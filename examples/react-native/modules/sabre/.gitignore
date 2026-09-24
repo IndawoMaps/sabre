@@ -1,3 +1,0 @@
-# Built from crates/mobile by `just mobile-android` / `just mobile-ios`.
-android/src/main/jniLibs/
-ios/SabreFFI.xcframework/

@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
   s.version        = package['version']
   s.summary        = package['description']
   s.description    = package['description']
-  s.license        = { type: 'FSL', file: '../../../../../LICENSE.md' }
+  s.license        = { type: 'FSL', file: '../LICENSE.md' }
   s.author         = 'sabre'
   s.homepage       = 'https://github.com/IndawoMaps/sabre'
   s.platforms      = { :ios => '16.4' }
@@ -18,7 +18,7 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
 
   s.source_files = "*.swift"
-  # Built by `just mobile-ios` from crates/mobile: the static library for
+  # Built by `just rn-ios` from crates/mobile: the static library for
   # device and simulator, with sabre.h and a module map declaring SabreFFI.
   s.vendored_frameworks = 'SabreFFI.xcframework'
   s.pod_target_xcconfig = {

@@ -1,0 +1,6 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": ["com.sabremaps.mobile.SabreModule"]
+  }
+}

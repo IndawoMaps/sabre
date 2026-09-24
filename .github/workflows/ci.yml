@@ -171,3 +171,51 @@ jobs:
           for p in browser ol; do (cd packages/$p && pnpm pack --pack-destination ../../dist); done
           tar tzf dist/sabremaps-browser-*.tgz | grep -q wasm/sabre_browser_bg.wasm
           tar tzf dist/sabremaps-browser-*.tgz | grep -q LICENSE.md
+
+  react-native:
+    name: react-native package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: Point cargo-ndk at the NDK the runner ships
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Build sabre-mobile for every Android ABI
+        # As `just rn-android`.
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=sabre --remap-path-prefix=/home/runner=~
+        run: |
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
+            -o packages/react-native/android/src/main/jniLibs build -p sabre-mobile --release
+          find packages/react-native/android/src/main/jniLibs -name '*.so' ! -name libsabre_mobile.so -delete
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the package and typecheck the example against it
+        run: |
+          pnpm --filter @sabremaps/react-native build
+          (cd examples/react-native && pnpm exec tsc --noEmit)
+      - name: Pack
+        run: |
+          mkdir -p dist
+          (cd packages/react-native && pnpm pack --pack-destination ../../dist)
+          tar tzf dist/sabremaps-react-native-*.tgz > contents
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q "jniLibs/$abi/libsabre_mobile.so" contents
+          done
+          grep -q build/index.js contents
+          grep -q app.plugin.js contents
+          grep -q LICENSE.md contents
+          # Only sabre's library: a dependency's stray cdylib would ship in every app.
+          test "$(grep -c '\.so$' contents)" = 4

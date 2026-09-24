@@ -13,5 +13,5 @@ android {
     versionName "0.0.1"
   }
   // libsabre_mobile.so for each ABI lands in src/main/jniLibs, built by
-  // `just mobile-android` from crates/mobile. Not checked in.
+  // `just rn-android` from crates/mobile. Shipped in the npm package, not the repo.
 }

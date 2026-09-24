@@ -44,36 +44,43 @@ browser-test:
 bench-browser *args: npm
     node bench/browser/run.ts {{args}}
 
-# ── Mobile (examples/react-native) ────────────────────────────────────────────
+# ── React Native (packages/react-native, examples/react-native) ─────────────
 # Toolchains come from mise.toml: java, android-sdk, cargo-ndk. The NDK itself
 # is installed with sdkmanager -- see examples/react-native/README.md.
 
-mobile_module := "examples/react-native/modules/sabre"
+rn_package := "packages/react-native"
 
-# Build sabre-mobile for Android into the Expo module's jniLibs.
-mobile-android profile="release":
+# Build sabre-mobile for every Android ABI into @sabremaps/react-native, then its JS.
+rn-android profile="release":
+    rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+    # Rust embeds source paths in panic messages; keep this machine's out of what ships.
     RUSTFLAGS="--remap-path-prefix={{justfile_directory()}}=sabre --remap-path-prefix=$HOME=~" \
-        cargo ndk -t arm64-v8a -t x86_64 -o {{mobile_module}}/android/src/main/jniLibs \
+        cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
+        -o {{rn_package}}/android/src/main/jniLibs \
         build -p sabre-mobile {{ if profile == "release" { "--release" } else { "" } }}
-    @ls -la {{mobile_module}}/android/src/main/jniLibs/*/libsabre_mobile.so
+    # cargo-ndk copies every cdylib it built, dependencies' too (proj4rs has
+    # one). Only sabre's is loaded; the rest would be dead weight in every app.
+    find {{rn_package}}/android/src/main/jniLibs -name '*.so' ! -name libsabre_mobile.so -delete
+    @ls -la {{rn_package}}/android/src/main/jniLibs/*/
+    pnpm --filter @sabremaps/react-native build
 
 # Build sabre-mobile for iOS (device + Apple silicon simulator) as SabreFFI.xcframework. Needs Xcode.
-mobile-ios:
+rn-ios:
     rustup target add aarch64-apple-ios aarch64-apple-ios-sim
     cargo build -p sabre-mobile --release --target aarch64-apple-ios
     cargo build -p sabre-mobile --release --target aarch64-apple-ios-sim
-    rm -rf {{mobile_module}}/ios/SabreFFI.xcframework
+    rm -rf {{rn_package}}/ios/SabreFFI.xcframework
     xcodebuild -create-xcframework \
         -library target/aarch64-apple-ios/release/libsabre_mobile.a -headers crates/mobile/include \
         -library target/aarch64-apple-ios-sim/release/libsabre_mobile.a -headers crates/mobile/include \
-        -output {{mobile_module}}/ios/SabreFFI.xcframework
+        -output {{rn_package}}/ios/SabreFFI.xcframework
 
-# Copy a raster into the Android app's files directory (debug builds only).
-mobile-push-android file:
+# Copy a raster into the Android example's files directory (debug builds only).
+rn-push-android file:
     adb push {{file}} /data/local/tmp/
     adb shell run-as com.sabremaps.example cp /data/local/tmp/$(basename {{file}}) files/
     adb shell rm /data/local/tmp/$(basename {{file}})
 
-# Build the Rust library, then build, install and launch the Android example.
-mobile-run-android: mobile-android
+# Build the package, then build, install and launch the Android example.
+rn-example-android: rn-android
     cd examples/react-native && pnpm exec expo run:android

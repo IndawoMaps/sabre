@@ -1,0 +1,47 @@
+{
+  "name": "@sabremaps/react-native",
+  "version": "0.0.1",
+  "description": "Cloud-Optimized GeoTIFFs on a MapLibre React Native map, offline and restyled at runtime: sabre's tile server runs inside the app.",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "files": [
+    "build",
+    "android/build.gradle",
+    "android/src",
+    "ios",
+    "app.plugin.js",
+    "expo-module.config.json",
+    "LICENSE.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE.md",
+  "keywords": [
+    "react-native",
+    "expo",
+    "maplibre",
+    "cog",
+    "geotiff",
+    "raster",
+    "offline"
+  ],
+  "peerDependencies": {
+    "@maplibre/maplibre-react-native": "^11.4.0",
+    "expo": ">=57.0.0",
+    "react": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@maplibre/maplibre-react-native": "^11.4.0",
+    "@types/react": "~19.2.2",
+    "expo": "~57.0.24",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "typescript": "~6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "prepack": "node -e \"for (const a of ['arm64-v8a','armeabi-v7a','x86','x86_64']) require('fs').statSync('android/src/main/jniLibs/'+a+'/libsabre_mobile.so')\" && tsc -p . && cp ../../LICENSE.md ."
+  }
+}

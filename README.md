@@ -406,6 +406,24 @@ map.addLayer(new TileLayer({
 [packages/ol](packages/ol/README.md) and [packages/browser](packages/browser/README.md),
 and `just example` for a running map. The raster's host has to allow CORS range requests.
 
+## In a React Native app
+
+`@sabremaps/react-native` puts sabre's tile server inside an Android app, so a MapLibre
+React Native map can draw GeoTIFFs stored on the device, offline, and restyle them at
+runtime:
+
+```tsx
+import { SabreRasterSource } from '@sabremaps/react-native';
+
+<Map mapStyle={style}>
+  <SabreRasterSource id="dem" source="dem.tif" style={{ mode: 'hillshade', hillshade_colormap: 'turbo' }} />
+</Map>
+```
+
+See [packages/react-native](packages/react-native/README.md), and
+[examples/react-native](examples/react-native/README.md) for a running app. iOS is not
+built yet.
+
 ## Using the library
 
 `sabre-core` has no HTTP client of its own. You supply a `RangeReader` and it does the
@@ -474,12 +492,15 @@ crates/
   server/     sabre-server — HTTP API: axum on tokio, with a byte cache of the raster it reads.
   browser/    sabre-browser — the same renderer as WebAssembly, reading COGs over fetch.
   cli/        sabre — command-line interface (early).
+  mobile/     sabre-mobile — the server on 127.0.0.1 inside an app, over JNI and a C ABI.
 packages/
   browser/    @sabremaps/browser — the wasm in a Web Worker, for any map library.
   ol/         @sabremaps/ol — an OpenLayers source built on it.
+  react-native/ @sabremaps/react-native — offline COGs on a MapLibre React Native map.
 examples/
   openlayers/ Vite + OpenLayers: sabre-server tiles, and in-browser rendering via @sabremaps/ol.
   wasm/       Bare pages driving the wasm directly (`just browser` builds what they load).
+  react-native/ Expo + MapLibre on Android, through @sabremaps/react-native.
 bench/        An HTTP benchmark of sabre-server against titiler — see bench/README.md.
   py/         A rasterio/GDAL port of the same operations, for comparison.
   browser/    sabre against OpenLayers' own GeoTIFF source, in Chrome via Playwright.

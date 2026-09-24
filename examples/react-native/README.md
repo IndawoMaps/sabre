@@ -1,35 +1,11 @@
-# sabre in React Native
+# @sabremaps/react-native example
 
-Offline GeoTIFFs on a MapLibre map in an Expo app, with styles you can change at
-runtime. **Spike:** Android is built and run from this repo; iOS is written but
-has not been built yet (it needs Xcode).
+An Expo app showing GeoTIFFs from the device on a MapLibre map, fully offline
+(the basemap is a plain background), with buttons to switch raster, mode,
+colormap and stretch. It uses [`@sabremaps/react-native`](../../packages/react-native)
+from the workspace: `App.tsx` is the whole integration.
 
-## How it works
-
-MapLibre Native reads raster tiles only from URL templates, so the app runs
-sabre's tile server itself, on the phone's loopback interface:
-
-```
-App.tsx ──Sabre.start()──▶ modules/sabre (Kotlin / Swift)
-                              │  JNI / C ABI
-                              ▼
-                   crates/mobile ── sabre-server router ── sabre-core
-                   127.0.0.1:{random port}/{token}/tiles/{z}/{x}/{y}?url=file://dem.tif&colormap=…
-                              ▲
-        MapLibre Native ──────┘  (RasterSource tiles=[that template])
-```
-
-- `file://` sources resolve inside the app's files directory (Android) or
-  Documents (iOS), and nowhere else.
-- Every route sits under a random per-launch token, because any app on an
-  Android device can connect to a loopback port.
-- Tiles are sent `Cache-Control: no-store`, so MapLibre's disk cache does
-  not keep a copy of every tile in every style.
-- **Restyling = a new tile URL.** MapLibre builds a raster source once and ignores
-  later changes to `tiles`, so the example keys the `RasterSource` (and its `id`)
-  by URL. A new style remounts the source and every visible tile re-renders.
-- `modules/sabre/app.plugin.js` allows cleartext HTTP to `127.0.0.1` only
-  (Android network security config) and sets `NSAllowsLocalNetworking` (iOS).
+Android only for now; the package's iOS side is not built yet.
 
 ## Setup
 
@@ -41,25 +17,22 @@ mise install
 yes | sdkmanager --licenses
 sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
   "ndk;27.1.12297006" "emulator" "system-images;android-35;google_apis;arm64-v8a"
-rustup target add aarch64-linux-android x86_64-linux-android
 avdmanager create avd -n sabre -k "system-images;android-35;google_apis;arm64-v8a"
 ```
 
-## Run (Android)
+If sdkmanager keeps failing with "Connection reset" on the large packages, the
+archives can be fetched with a resumable `curl -C -` from the URLs in
+`https://dl.google.com/android/repository/repository2-3.xml` and unpacked
+into `$ANDROID_HOME` by hand.
+
+## Run
 
 ```sh
 emulator -avd sabre &
 pnpm install
-just mobile-run-android                    # builds libsabre_mobile.so, then expo run:android
-just mobile-push-android data/ca.cog.tiff  # then reload the app
+just rn-example-android                 # native libraries + package JS, then expo run:android
+just rn-push-android data/ca.cog.tiff   # copy a raster into the app, then reload
 ```
 
-## iOS (not yet built)
-
-```sh
-just mobile-ios                            # SabreFFI.xcframework, needs Xcode
-cd examples/react-native && pnpm exec expo run:ios
-```
-
-Rasters go in the app's Documents directory (for the simulator,
-`xcrun simctl get_app_container booted com.sabremaps.example data`).
+`just rn-android` rebuilds only the package (after a change in `crates/`), and
+`pnpm --filter @sabremaps/react-native build` only its TypeScript.
