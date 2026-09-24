@@ -1,0 +1,8 @@
+{
+  "name": "sabre",
+  "version": "0.0.1",
+  "description": "sabre's tile server inside the app, for MapLibre Native to read offline COGs",
+  "main": "index.ts",
+  "license": "SEE LICENSE IN ../../../../LICENSE.md",
+  "private": true
+}

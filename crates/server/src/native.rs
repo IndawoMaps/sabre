@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sabre_core::cog::RangeReader;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::task::LocalPoolHandle;
 
 use crate::geometry;
@@ -49,18 +48,37 @@ impl RangeReader for HttpRangeReader {
 
 /// Reads a local file. Ranges past the end of the file are truncated, which
 /// matches how object stores answer an over-long range request.
+///
+/// The file is opened once, when the reader is made, and read with positional
+/// reads: a tile makes several reads, and opening and seeking for each one
+/// showed up on phones, where this is the only kind of source there is.
 pub struct FileRangeReader {
     path: PathBuf,
+    file: std::fs::File,
+}
+
+impl FileRangeReader {
+    pub fn open(path: PathBuf) -> Result<Self, String> {
+        let file = std::fs::File::open(&path).map_err(|e| format!("{e} for {}", path.display()))?;
+        Ok(Self { path, file })
+    }
 }
 
 #[async_trait(?Send)]
 impl RangeReader for FileRangeReader {
     async fn read_range(&self, offset: u64, length: u64) -> Result<Vec<u8>, String> {
-        let describe = |e: std::io::Error| format!("{e} for {}", self.path.display());
-        let mut file = tokio::fs::File::open(&self.path).await.map_err(describe)?;
-        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(describe)?;
-        let mut buf = Vec::with_capacity(length as usize);
-        file.take(length).read_to_end(&mut buf).await.map_err(describe)?;
+        use std::os::unix::fs::FileExt;
+        let mut buf = vec![0u8; length as usize];
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.file.read_at(&mut buf[filled..], offset + filled as u64) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("{e} for {}", self.path.display())),
+            }
+        }
+        buf.truncate(filled);
         Ok(buf)
     }
 }
@@ -245,7 +263,7 @@ impl NativeBackend {
         if let Some(rest) = source.strip_prefix("file://") {
             let root = self.file_root.as_deref()
                 .ok_or("file:// sources are disabled; start the server with --file-root <dir> to enable them")?;
-            return Ok(Box::new(FileRangeReader { path: resolve_file(root, rest)? }));
+            return Ok(Box::new(FileRangeReader::open(resolve_file(root, rest)?)?));
         }
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return Err(format!("unsupported source URL scheme: {source}"));

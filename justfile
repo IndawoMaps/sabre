@@ -43,3 +43,37 @@ browser-test:
 # Benchmark sabre against OpenLayers' GeoTIFF source in Chrome. See bench/browser/README.md.
 bench-browser *args: npm
     node bench/browser/run.ts {{args}}
+
+# ── Mobile (examples/react-native) ────────────────────────────────────────────
+# Toolchains come from mise.toml: java, android-sdk, cargo-ndk. The NDK itself
+# is installed with sdkmanager -- see examples/react-native/README.md.
+
+mobile_module := "examples/react-native/modules/sabre"
+
+# Build sabre-mobile for Android into the Expo module's jniLibs.
+mobile-android profile="release":
+    RUSTFLAGS="--remap-path-prefix={{justfile_directory()}}=sabre --remap-path-prefix=$HOME=~" \
+        cargo ndk -t arm64-v8a -t x86_64 -o {{mobile_module}}/android/src/main/jniLibs \
+        build -p sabre-mobile {{ if profile == "release" { "--release" } else { "" } }}
+    @ls -la {{mobile_module}}/android/src/main/jniLibs/*/libsabre_mobile.so
+
+# Build sabre-mobile for iOS (device + Apple silicon simulator) as SabreFFI.xcframework. Needs Xcode.
+mobile-ios:
+    rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+    cargo build -p sabre-mobile --release --target aarch64-apple-ios
+    cargo build -p sabre-mobile --release --target aarch64-apple-ios-sim
+    rm -rf {{mobile_module}}/ios/SabreFFI.xcframework
+    xcodebuild -create-xcframework \
+        -library target/aarch64-apple-ios/release/libsabre_mobile.a -headers crates/mobile/include \
+        -library target/aarch64-apple-ios-sim/release/libsabre_mobile.a -headers crates/mobile/include \
+        -output {{mobile_module}}/ios/SabreFFI.xcframework
+
+# Copy a raster into the Android app's files directory (debug builds only).
+mobile-push-android file:
+    adb push {{file}} /data/local/tmp/
+    adb shell run-as com.sabremaps.example cp /data/local/tmp/$(basename {{file}}) files/
+    adb shell rm /data/local/tmp/$(basename {{file}})
+
+# Build the Rust library, then build, install and launch the Android example.
+mobile-run-android: mobile-android
+    cd examples/react-native && pnpm exec expo run:android

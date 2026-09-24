@@ -1,9 +1,12 @@
 [tools]
+java = "temurin-17"
 just = "latest"
 pnpm = "latest"
 rust = "latest"
 terraform = "latest"
 uv = "latest"
+android-sdk = "20.0"
+"cargo:cargo-ndk" = "latest"
 
 [tasks.serve]
 description = 'serve local TIFF files with range-request support'
