@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
   s.version        = package['version']
   s.summary        = package['description']
   s.description    = package['description']
-  s.license        = { type: 'FSL', file: '../LICENSE.md' }
+  s.license        = { type: 'Apache-2.0', file: '../LICENSE.md' }
   s.author         = 'sabre'
   s.homepage       = 'https://github.com/IndawoMaps/sabre'
   s.platforms      = { :ios => '16.4' }

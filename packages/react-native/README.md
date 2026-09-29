@@ -140,7 +140,4 @@ disk cache does not fill with copies of tiles the device can render again.
 
 ## License
 
-[FSL-1.1-ALv2](./LICENSE.md), included in the package. In short: use it for
-anything, commercial use included, except offering it in a commercial product or
-service that competes with sabre. Each release also becomes available under
-Apache 2.0 two years after it ships.
+[Apache License 2.0](./LICENSE.md), included in the package.

@@ -13,7 +13,7 @@
     "expo-module.config.json",
     "LICENSE.md"
   ],
-  "license": "SEE LICENSE IN LICENSE.md",
+  "license": "Apache-2.0",
   "keywords": [
     "react-native",
     "expo",
