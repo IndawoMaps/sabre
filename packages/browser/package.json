@@ -1,0 +1,34 @@
+{
+  "name": "@sabremaps/browser",
+  "version": "0.0.1",
+  "description": "Render Cloud-Optimized GeoTIFF tiles in the browser: range reads, five style modes, reprojection, in a Web Worker. No server.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "wasm/sabre_browser.js",
+    "wasm/sabre_browser_bg.wasm",
+    "LICENSE.md"
+  ],
+  "sideEffects": false,
+  "license": "Apache-2.0",
+  "keywords": [
+    "cog",
+    "geotiff",
+    "raster",
+    "tiles",
+    "wasm",
+    "webworker"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "node -e \"require('fs').statSync('wasm/sabre_browser_bg.wasm')\" && cp ../../LICENSE.md ."
+  }
+}

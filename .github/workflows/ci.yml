@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  browser:
+    name: browser (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: stable
+          install-chromedriver: true
+
+      # The point of this job. `cargo check --target wasm32` compiles code that
+      # panics the moment it runs -- std::time::Instant::now() does exactly
+      # that -- so the browser target is only meaningfully covered by tests
+      # that execute. Reintroducing that bug fails this step and nothing else.
+      #
+      # webdriver.json names the Chrome that setup-chrome installed. Without
+      # it chromedriver takes the runner's preinstalled /opt/google/chrome,
+      # which is a different major version, and refuses the session:
+      # "This version of ChromeDriver only supports Chrome version 154 /
+      # Current browser version is 152".
+      #
+      # It goes in the package directory, not the workspace root: that is
+      # where wasm-bindgen-test-runner looks, and putting it anywhere else
+      # gets a quiet "Not found" and the wrong Chrome.
+      - name: Test in headless Chrome
+        env:
+          CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: |
+          cat > crates/browser/webdriver.json <<JSON
+          {
+            "goog:chromeOptions": {
+              "binary": "${{ steps.chrome.outputs.chrome-path }}",
+              "args": ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"]
+            }
+          }
+          JSON
+          "$CHROMEDRIVER" --version
+          "${{ steps.chrome.outputs.chrome-path }}" --version
+          cargo test -p sabre-browser --target wasm32-unknown-unknown
+
+      # Release too: the size numbers only mean anything with LTO applied, and
+      # a member manifest's [profile.release] is silently ignored, so this is
+      # also what proves the workspace-root profile is the one in effect.
+      - name: Build the bundle
+        run: |
+          cargo build -p sabre-browser --target wasm32-unknown-unknown --release
+          wasm-bindgen --target web --out-dir examples/wasm/pkg --no-typescript \
+            target/wasm32-unknown-unknown/release/sabre_browser.wasm
+
+      - name: Report bundle size
+        run: |
+          raw=$(stat -c%s examples/wasm/pkg/sabre_browser_bg.wasm)
+          br=$(brotli -q 11 -c examples/wasm/pkg/sabre_browser_bg.wasm | wc -c)
+          printf '| | bytes | \n| --- | --- |\n| wasm | %s |\n| brotli | %s |\n' \
+            "$(numfmt --grouping $raw)" "$(numfmt --grouping $br)" >> "$GITHUB_STEP_SUMMARY"
+          # A budget rather than a target: the client path stops being worth it
+          # if the decoder costs more than the imagery. Raise it deliberately.
+          limit=$((300 * 1024))
+          if [ "$br" -gt "$limit" ]; then
+            echo "::error::brotli bundle is $br bytes, over the $limit budget"
+            exit 1
+          fi
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Advisory for now — see CONTRIBUTING.md. Not yet gated on -D warnings.
+      - run: cargo clippy --workspace --all-targets
+
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # The Dockerfile copies the workspace in pieces, so a member outside
+      # crates/ that isn't added there breaks the image while every cargo job here
+      # passes. Without this job that surfaced only in `release`, after merge.
+      # The default target is enough: its build stage compiles both binaries.
+      # Reads release's cache but never writes it, so a PR can't evict main's.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=sabre-build
+
+  npm:
+    name: npm packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Build the wasm into @sabremaps/browser
+        # As `just npm`: rewrite embedded source paths, which name the runner's
+        # home directory otherwise.
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=sabre --remap-path-prefix=/home/runner=~
+        run: |
+          cargo build -p sabre-browser --target wasm32-unknown-unknown --release
+          wasm-bindgen --target web --out-dir packages/browser/wasm --no-typescript \
+            target/wasm32-unknown-unknown/release/sabre_browser.wasm
+      - run: pnpm install --frozen-lockfile
+      # The example imports @sabremaps/ol, so this is the check that a bundler
+      # still finds the worker and the wasm inside the packages.
+      - name: Bundle the example
+        working-directory: examples/openlayers
+        run: |
+          pnpm exec vite build
+          ls dist/assets | grep -q '\.wasm$'
+          ls dist/assets | grep -q '^worker-'
+      - name: Pack
+        run: |
+          mkdir -p dist
+          for p in browser ol; do (cd packages/$p && pnpm pack --pack-destination ../../dist); done
+          tar tzf dist/sabremaps-browser-*.tgz | grep -q wasm/sabre_browser_bg.wasm
+          tar tzf dist/sabremaps-browser-*.tgz | grep -q LICENSE.md

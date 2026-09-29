@@ -1,0 +1,79 @@
+# Merges Dependabot's minor and patch updates once CI passes on them.
+#
+# GitHub's own auto-merge needs required status checks, which a private repo
+# on the free plan can't have. So this does it in two steps: when Dependabot
+# opens a PR that isn't a major update, it gets the `automerge` label; when CI
+# then succeeds on a labelled PR, this merges it. Majors are left for a human,
+# who can opt one in by adding the label.
+#
+# A merge made with the default token doesn't start the release workflow on
+# main -- GitHub doesn't run workflows for its own token's pushes -- so the
+# release PR only catches up at the next human merge. The release bot's token
+# (CONTRIBUTING.md#releases) closes that gap when it's configured.
+
+name: dependabot
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+jobs:
+  label:
+    name: label
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v3
+
+      - if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh label create automerge --color 0e8a16 \
+            --description "Merged by .github/workflows/dependabot.yml once CI passes" --force
+          gh pr edit "$PR" --add-label automerge
+
+  merge:
+    name: merge
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: app
+        if: vars.RELEASE_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      # --match-head-commit: only the commit CI passed on. If Dependabot has
+      # pushed since, that push's own CI run gets to decide.
+      - env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(gh pr list --head "$BRANCH" --state open --author app/dependabot \
+                 --label automerge --json number --jq '.[0].number')
+          if [ -z "$pr" ]; then
+            echo "No open, labelled Dependabot PR for $BRANCH; leaving it."
+            exit 0
+          fi
+          gh pr merge "$pr" --squash --delete-branch --match-head-commit "$SHA"

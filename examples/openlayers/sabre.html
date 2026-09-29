@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>sabre in OpenLayers</title>
+    <style>
+      html, body, #map { margin: 0; height: 100%; }
+      #panel { position: absolute; top: 12px; right: 12px; background: #fff; padding: 10px 12px;
+               font: 13px/1.5 system-ui, sans-serif; border-radius: 6px; box-shadow: 0 1px 4px #0003; }
+      #panel label { display: block; }
+      #status { margin-top: 6px; color: #555; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="panel">
+      <label>mode
+        <select id="mode">
+          <option>colormap</option><option>hillshade</option>
+          <option>contour</option><option>classified</option>
+        </select>
+      </label>
+      <div id="status">opening…</div>
+    </div>
+    <script type="module" src="/src/sabre.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/*", "bench/client"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+authors = ["Michael Cohen <miccoh1994@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/IndawoMaps/sabre"
+homepage = "https://github.com/IndawoMaps/sabre"
+keywords = ["geospatial", "cog", "geotiff", "tiles", "raster"]
+categories = ["science::geo", "wasm"]
+
+# Applied to every crate, but chosen for the browser build, where the download
+# is the thing being judged. Profiles only take effect in the workspace root --
+# a member manifest's are ignored with a warning.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

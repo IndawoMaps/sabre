@@ -1,0 +1,115 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>sabre in the browser — spike</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; max-width: 70rem; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  td, th { border: 1px solid #ccc; padding: 2px 10px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  #tiles { display: flex; gap: 4px; flex-wrap: wrap; margin: 1rem 0; }
+  #tiles img { width: 128px; height: 128px; image-rendering: pixelated; border: 1px solid #ddd; }
+  pre { background: #f6f6f6; padding: 8px; white-space: pre-wrap; }
+</style>
+<h1>sabre-core in a browser tab</h1>
+<p>Reading a real Sentinel-2 L2A scene straight from object storage over <code>fetch</code>
+range requests. No server in the path.</p>
+<div id="out">starting…</div>
+<div id="tiles"></div>
+<pre id="log"></pre>
+
+<script type="module">
+import init, { Cog } from './pkg/sabre_browser.js';
+
+const SCENE = 'https://sabre-bench-tf.nyc3.digitaloceanspaces.com/scenes/S2A_35HLD_20260805_0_L2A_red.tif';
+const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+const results = {};
+
+// The farm this scene covers, at the zoom someone looking at it would use.
+const TILES = [
+  [14, 9353, 9804], [14, 9354, 9804], [14, 9353, 9805], [14, 9354, 9805],
+  [15, 18707, 19609], [15, 18708, 19609], [16, 37414, 39218], [16, 37415, 39218],
+];
+
+function show(png) {
+  const img = document.createElement('img');
+  img.src = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+  document.getElementById('tiles').appendChild(img);
+}
+
+(async () => {
+  const t0 = performance.now();
+  await init();
+  results.module_init_ms = performance.now() - t0;
+  log(`wasm module ready in ${results.module_init_ms.toFixed(1)} ms`);
+
+  const cog = new Cog(SCENE);
+
+  const tInfo = performance.now();
+  const info = JSON.parse(await cog.info());
+  results.info_ms = performance.now() - tInfo;
+  results.info = info;
+  log(`info in ${results.info_ms.toFixed(1)} ms: ${JSON.stringify(info)}`);
+
+  // This is the proj4rs question: EPSG:32735 means every tile reprojects.
+  results.reprojects = info.epsg !== 4326 && info.epsg !== null;
+
+  // Cold: nothing cached, header not read yet.
+  cog.forget();
+  const tCold = performance.now();
+  const cold = await cog.png(...TILES[0], '{"colormap":"viridis","min":0,"max":3000}');
+  results.cold_ms = performance.now() - tCold;
+  results.cold_requests = cold.requests;
+  results.cold_timing = cold.timing;
+  log(`cold tile  ${results.cold_ms.toFixed(1)} ms, ${cold.requests} range requests`);
+  log(`  ${cold.timing}`);
+  show(cold.data);
+
+  // Warm: same tile again, everything cached.
+  const warmRuns = [];
+  for (let i = 0; i < 20; i++) {
+    const t = performance.now();
+    const r = await cog.png(...TILES[0], '{"colormap":"viridis","min":0,"max":3000}');
+    warmRuns.push(performance.now() - t);
+    if (i === 0) { results.warm_timing = r.timing; results.warm_requests = r.requests; }
+  }
+  warmRuns.sort((a, b) => a - b);
+  results.warm_p50_ms = warmRuns[warmRuns.length >> 1];
+  log(`warm tile  ${results.warm_p50_ms.toFixed(2)} ms p50 over 20, ${results.warm_requests} range requests`);
+  log(`  ${results.warm_timing}`);
+
+  // Panning: neighbouring tiles, which is what a tab actually does.
+  const panStart = performance.now();
+  const before = cog.requests;
+  for (const t of TILES.slice(1)) {
+    const r = await cog.png(...t, '{"colormap":"viridis","min":0,"max":3000}');
+    show(r.data);
+  }
+  results.pan_ms = performance.now() - panStart;
+  results.pan_requests = cog.requests - before;
+  results.pan_tiles = TILES.length - 1;
+  log(`panning ${results.pan_tiles} more tiles: ${results.pan_ms.toFixed(1)} ms total, ` +
+      `${results.pan_requests} range requests`);
+
+  // Same pan with the cache off, for the comparison that matters.
+  cog.forget();
+  const uncachedStart = performance.now();
+  const beforeU = cog.requests;
+  cog.cache = false;
+  for (const t of TILES) await cog.png(...t, '{"colormap":"viridis","min":0,"max":3000}');
+  cog.cache = true;
+  results.uncached_ms = performance.now() - uncachedStart;
+  results.uncached_requests = cog.requests - beforeU;
+  log(`same ${TILES.length} tiles, cache off: ${results.uncached_ms.toFixed(1)} ms, ` +
+      `${results.uncached_requests} range requests`);
+
+  results.total_bytes = cog.bytes;
+  log(`\ntotal pulled from object storage: ${(cog.bytes / 1e6).toFixed(2)} MB`);
+
+  document.getElementById('out').textContent = 'done';
+  window.__results = results;
+})().catch(e => {
+  document.getElementById('out').textContent = 'FAILED: ' + e;
+  window.__results = { error: String(e) };
+  log('ERROR ' + e);
+});
+</script>

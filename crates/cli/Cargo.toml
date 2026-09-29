@@ -1,0 +1,19 @@
+[package]
+name = "sabre-cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line interface for sabre."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[[bin]]
+name = "sabre"
+path = "src/main.rs"
+
+[dependencies]
+sabre-core = { path = "../core" }

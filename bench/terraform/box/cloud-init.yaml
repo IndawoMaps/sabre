@@ -1,0 +1,135 @@
+#cloud-config
+# Prepares the box for bench/run.py. It does not fetch the repo: sabre is
+# private, so the working copy comes from your machine over rsync (see the
+# terraform output) rather than from a deploy key baked into an image.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - rsync
+  # run.py imports both for the per-pixel tile comparison. Without them it
+  # silently degrades to comparing byte counts, which proves nothing about
+  # whether the two servers agree on what they rendered.
+  - python3-numpy
+  - python3-pil
+  # bench/publish.py uploads results to the Space and rebuilds the index.
+  - python3-boto3
+
+write_files:
+  # Background apt work during a run shows up as latency in the percentiles.
+  - path: /etc/apt/apt.conf.d/99-bench-no-auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Unattended-Upgrade "0";
+
+  - path: /etc/motd
+    content: |
+
+      sabre benchmark box. The synthetic DEM is in bench/data/dem.tif, and any
+      Sentinel-2 scenes are in bench/data/scenes/.
+
+        cd ~/sabre
+        docker compose -f bench/docker-compose.yml up --build -d
+        python3 bench/run.py --cold
+
+      This box is ephemeral and billed by the hour. `terraform destroy` when done.
+
+  # "<sha256> <url> <filename>" per Sentinel-2 scene, empty when none are
+  # published. A file rather than a heredoc in runcmd: the YAML block scalar
+  # and the shell each have their own view of leading whitespace, and only one
+  # of them can be satisfied at a time.
+  - path: /root/scenes.tsv
+    content: |
+      ${indent(6, scenes)}
+
+  # Private key the orchestrator uses to drive bench-client on the generator.
+  # Written unconditionally and removed below when it is empty, which is the
+  # single-box case: cloud-init has no conditionals, so the emptiness is
+  # decided in Terraform and acted on here.
+  - path: /root/.ssh/bench_orchestrator
+    permissions: "0600"
+    content: |
+      ${indent(6, orchestrator_private_key)}
+
+runcmd:
+  - |
+    if [ ! -s /root/.ssh/bench_orchestrator ] || ! grep -q PRIVATE /root/.ssh/bench_orchestrator; then
+      rm -f /root/.ssh/bench_orchestrator
+    else
+      chmod 600 /root/.ssh/bench_orchestrator
+      # The generator is created in the same apply, so its host key is not
+      # knowable in advance. accept-new pins it on first contact and refuses a
+      # change after, which is the strongest thing available without a CA.
+      printf 'Host bench-client\n  HostName ${client_private_ip}\n  User root\n  IdentityFile /root/.ssh/bench_orchestrator\n  StrictHostKeyChecking accept-new\n  BatchMode yes\n' > /root/.ssh/config
+      chmod 600 /root/.ssh/config
+    fi
+
+  # Docker's own repository, for the compose v2 plugin that run.py shells out to.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - >
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc]
+    https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable"
+    > /etc/apt/sources.list.d/docker.list
+  - apt-get update -qq
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+
+  # Keep the timers from waking up mid-run.
+  - systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
+
+  - mkdir -p /root/sabre/bench/data
+
+  # The dataset comes from the Space rather than being regenerated here: it is
+  # 70 MB over the same-region network against ~2 minutes of numpy and GDAL,
+  # and more importantly it is the *same* 70 MB every time. rsync from your
+  # machine excludes bench/data, so this file survives a push.
+  - curl -fsSL --retry 5 --retry-delay 2 -o /root/sabre/bench/data/dem.tif "${dataset_url}"
+  - |
+    got=$(sha256sum /root/sabre/bench/data/dem.tif | cut -d" " -f1)
+    if [ "$got" != "${dataset_sha256}" ]; then
+      echo "dataset sha256 mismatch: got $got want ${dataset_sha256}" >&2
+      mv /root/sabre/bench/data/dem.tif /root/dem.tif.rejected
+      echo "DATASET MISMATCH - benchmark would measure the wrong bytes" > /var/lib/cloud/bench-dataset-failed
+      exit 1
+    fi
+    echo "dataset ok: $got" > /var/lib/cloud/bench-dataset
+
+  # Sentinel-2 scenes, if any were published. These are large -- a few hundred
+  # MB each -- but they come from a Space in this region, and the alternative
+  # is every run re-reading them across a continent from us-west-2.
+  #
+  # A 404 here is not tolerable: the manifest says these scenes exist, so a
+  # missing one means the box would quietly benchmark a smaller workload than
+  # the results claim. Fail the boot instead.
+  - |
+    set -u
+    mkdir -p /root/sabre/bench/data/scenes
+    n=0
+    # `|| [ -n "$sha" ]` so a final line with no trailing newline is still
+    # processed rather than silently skipped.
+    while read -r sha url file || [ -n "$sha" ]; do
+      [ -n "$file" ] || continue
+      n=$((n + 1))
+      dest="/root/sabre/bench/data/scenes/$file"
+      if ! curl -fsSL --retry 5 --retry-delay 2 -o "$dest" "$url"; then
+        echo "SCENE FETCH FAILED: $url" > /var/lib/cloud/bench-scenes-failed
+        exit 1
+      fi
+      got=$(sha256sum "$dest" | cut -d" " -f1)
+      if [ -n "$sha" ] && [ "$got" != "$sha" ]; then
+        echo "SCENE MISMATCH: $file got $got want $sha" > /var/lib/cloud/bench-scenes-failed
+        exit 1
+      fi
+    done < /root/scenes.tsv
+    echo "$n scenes ok" > /var/lib/cloud/bench-scenes
+
+  # The terraform output polls this, so it is written last.
+  - docker --version > /var/lib/cloud/bench-ready
+  - docker compose version >> /var/lib/cloud/bench-ready

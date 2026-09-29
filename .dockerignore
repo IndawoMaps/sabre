@@ -1,0 +1,11 @@
+.git
+target
+build
+node_modules
+examples
+packages
+bench/py
+docs
+*.tif
+*.tiff
+!crates/core/tests/fixtures/*.tiff

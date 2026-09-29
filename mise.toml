@@ -1,0 +1,23 @@
+[tools]
+just = "latest"
+pnpm = "latest"
+rust = "latest"
+terraform = "latest"
+uv = "latest"
+
+[tasks.serve]
+description = 'serve local TIFF files with range-request support'
+run = "pnpx serve --listen 8080 data"
+
+[tasks."demo:dev"]
+description = 'run the demo'
+run = "cd examples/openlayers && pnpm dev"
+
+[tasks.server]
+description = 'run the native tile server, serving local TIFF files'
+run = "cargo run --release -p sabre-server -- --file-root data"
+
+
+[tasks.dev]
+description = 'run the tiling server'
+depends = ["serve", "demo:dev"]

@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>real farm COG in the browser</title>
+<style>body{font:13px/1.5 ui-monospace,monospace;margin:2rem}pre{background:#f6f6f6;padding:10px}
+#t{display:flex;gap:3px;flex-wrap:wrap;margin:1rem 0}#t img{width:110px;height:110px;image-rendering:pixelated;border:1px solid #ddd}</style>
+<h1>A real farm COG, client-side</h1>
+<p>1101×1033 float32 at ~4 m/px, 651 KB, EPSG:4326, no predictor — one property.</p>
+<p><b>Point it at your own file.</b> Serve a COG with CORS and <code>Range</code>
+(see <code>bench/</code>) and change <code>URL_</code> below. The raster this was
+written against is not in the repo.</p>
+<div id="out">running…</div>
+<div id="t"></div>
+<pre id="log"></pre>
+<script type="module">
+import init, { Cog } from './pkg/sabre_browser.js';
+const log = s => document.getElementById('log').textContent += s + '\n';
+const URL_ = 'http://127.0.0.1:8792/raw.tiff';
+const W = 20.6385, S = -28.8273, E = 20.68, N = -28.786;
+
+function tilesFor(z) {
+  const n = 2 ** z, out = [];
+  const xs = lon => Math.floor((lon + 180) / 360 * n);
+  const ys = lat => { const r = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n); };
+  for (let x = xs(W); x <= xs(E); x++) for (let y = ys(N); y <= ys(S); y++) out.push([z, x, y]);
+  return out;
+}
+const PAN = [13, 14, 15, 16].flatMap(tilesFor);
+
+async function session(mode) {
+  const cog = new Cog(URL_ + '?cb=' + Math.random());
+  const t0 = performance.now();
+  if (mode === 'whole') await cog.preload();
+  const first = await cog.png(...PAN[0], '{"colormap":"viridis","min":0,"max":15}');
+  const firstMs = performance.now() - t0;
+  const p0 = performance.now();
+  const imgs = [];
+  for (const t of PAN.slice(1)) imgs.push(await cog.png(...t, '{"colormap":"viridis","min":0,"max":15}'));
+  return { mode, firstMs, panMs: performance.now() - p0, tiles: PAN.length,
+           requests: cog.requests, readKB: cog.bytes / 1024,
+           imgs: mode === 'stream' ? [first, ...imgs].slice(0, 12) : [] };
+}
+
+(async () => {
+  await init();
+  await fetch(URL_, { headers: { Range: 'bytes=0-1023' } });   // warm the connection
+  const rows = [];
+  for (const mode of ['stream', 'whole']) {
+    const runs = [];
+    for (let i = 0; i < 3; i++) runs.push(await session(mode));
+    const med = k => runs.map(r => r[k]).sort((a,b)=>a-b)[1];
+    const r = runs[0];
+    rows.push({ mode, firstMs: +med('firstMs').toFixed(0), panMs: +med('panMs').toFixed(0),
+                tiles: r.tiles, requests: r.requests, readKB: +r.readKB.toFixed(0),
+                pctOfFile: +(100 * r.readKB * 1024 / 650974).toFixed(0) });
+    log(`${mode.padEnd(7)} first ${String(rows.at(-1).firstMs).padStart(4)} ms | ` +
+        `pan ${r.tiles - 1} tiles ${String(rows.at(-1).panMs).padStart(5)} ms | ` +
+        `${String(r.requests).padStart(3)} req | read ${String(rows.at(-1).readKB).padStart(4)} KB ` +
+        `(${rows.at(-1).pctOfFile}% of file)`);
+    if (r.imgs.length) for (const im of r.imgs) {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(new Blob([im.data], {type:'image/png'}));
+      document.getElementById('t').appendChild(img);
+    }
+  }
+  window.__rows = rows;
+  document.getElementById('out').textContent = 'done';
+})().catch(e => { document.getElementById('out').textContent='FAILED '+e; window.__rows={error:String(e)}; });
+</script>

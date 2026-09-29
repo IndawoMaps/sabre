@@ -1,0 +1,205 @@
+# Cuts releases, and publishes the images a benchmark box pulls.
+#
+# Every push to main runs release-please, which keeps a release PR open with
+# the next version and its changelog, worked out from the conventional-commit
+# PR titles merged since the last release. Merging that PR is the release: this
+# same run then tags it, writes the GitHub release, attaches the binaries and
+# publishes the npm packages. Nothing else cuts a release -- a hand-pushed tag
+# would skip the changelog and leave the manifest behind.
+#
+# The benchmark used to compile sabre-server and bench-client on the droplets
+# themselves, which was ten to twenty minutes of a box that lives for an hour.
+# It also meant the thing under test was built by whatever toolchain the box
+# happened to have. Both problems go away if CI builds once and the box pulls.
+#
+# Images are tagged by commit SHA as well as by branch. Benchmarks should pin
+# the SHA: it makes the image the provenance, so a result is tied to a commit
+# whether or not the box that produced it had a git checkout.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Not cancelled: a run that has just tagged a release still has binaries and
+  # npm to publish, and a push landing behind it must not cut that short. A
+  # newer push still replaces any run that is only queued.
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # Optional. With the default token the release PR runs no CI, since
+      # GitHub doesn't start workflows for events its own token causes. A
+      # GitHub App's token does. See CONTRIBUTING.md#releases.
+      - id: app
+        if: vars.RELEASE_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app.outputs.token || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  images:
+    name: images
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - target: server
+            image: sabre-server
+          - target: bench-client
+            image: sabre-bench-client
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          # The release's tag isn't the ref this ran for -- the run is a push
+          # to main -- so the semver tags take their value explicitly.
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}},value=${{ needs.release-please.outputs.tag }},enable=${{ needs.release-please.outputs.created == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-please.outputs.tag }},enable=${{ needs.release-please.outputs.created == 'true' }}
+          # Only a release is `latest`. A benchmark that pulled `latest` from
+          # main would silently change what it measures.
+          flavor: latest=${{ needs.release-please.outputs.created == 'true' }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          # DigitalOcean droplets are amd64. Adding arm64 would roughly double
+          # the build for an image nothing pulls.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Shared across both matrix legs: same compile, same cache.
+          cache-from: type=gha,scope=sabre-build
+          cache-to: type=gha,scope=sabre-build,mode=max
+
+  binaries:
+    name: binaries
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release -p sabre-server -p sabre-cli -p sabre-bench-client
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          for b in sabre-server sabre bench-client; do
+            install -m 0755 "target/release/$b" "dist/$b-linux-amd64"
+          done
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          ls -l dist
+
+      # Onto the release release-please just wrote, leaving its notes alone.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release-please.outputs.tag }}" dist/* --clobber
+
+  npm:
+    name: npm publish
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing: the registry takes this workflow's OIDC token in
+      # place of a stored NPM_TOKEN. Each package names this repo and
+      # release.yml as its trusted publisher on npmjs.com.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      # 24 for its npm 11: trusted publishing needs 11.5.1 or later.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Build the wasm into @sabremaps/browser
+        # As `just npm`: rewrite embedded source paths, which name the runner's
+        # home directory otherwise.
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=sabre --remap-path-prefix=/home/runner=~
+        run: |
+          cargo build -p sabre-browser --target wasm32-unknown-unknown --release
+          wasm-bindgen --target web --out-dir packages/browser/wasm --no-typescript \
+            target/wasm32-unknown-unknown/release/sabre_browser.wasm
+
+      - run: pnpm install --frozen-lockfile
+
+      # pnpm packs, since it rewrites @sabremaps/ol's `workspace:^` into the
+      # version being released; npm publishes, since it speaks OIDC. browser
+      # goes first so ol never points at a version that isn't there yet.
+      - name: Publish
+        run: |
+          mkdir -p dist
+          for p in browser ol; do
+            (cd packages/$p && pnpm pack --pack-destination ../../dist)
+          done
+          tar tzf dist/sabremaps-browser-*.tgz | grep -q wasm/sabre_browser_bg.wasm
+          npm publish dist/sabremaps-browser-*.tgz --access public
+          npm publish dist/sabremaps-ol-*.tgz --access public

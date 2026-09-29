@@ -1,0 +1,113 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #111; }
+#map { width: 100vw; height: 100vh; }
+
+/* ── shared panel base ── */
+.card, .tile-debug, .controls {
+  position: absolute;
+  background: rgba(8, 8, 8, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+}
+
+/* ── info card ── */
+.card {
+  top: 14px; left: 14px;
+  color: #d8d8d8;
+  padding: 12px 16px;
+  font: 13px/1.65 'SF Mono', 'Fira Code', monospace;
+  pointer-events: none;
+  min-width: 230px;
+}
+.card h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: inherit;
+  background: rgba(255, 165, 60, 0.18);
+  color: #ffb055;
+  border: 1px solid rgba(255, 165, 60, 0.3);
+}
+.row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+
+/* ── tile debug panel ── */
+.tile-debug {
+  bottom: 100px; left: 14px;
+  color: #d8d8d8;
+  padding: 10px 14px;
+  font: 12px/1.6 'SF Mono', 'Fira Code', monospace;
+  pointer-events: none;
+  min-width: 260px;
+}
+.debug-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.debug-label {
+  color: #666;
+  min-width: 58px;
+  font-size: 11px;
+}
+.debug-value { color: #d8d8d8; }
+.status-ok    { color: #6dbf6d; }
+.status-empty { color: #888; }
+
+/* ── controls ── */
+.controls {
+  bottom: 18px; right: 14px;
+  color: #d8d8d8;
+  padding: 12px 16px;
+  font: 12px/1.5 system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 210px;
+}
+.controls label { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.controls input[type=range] { flex: 1; accent-color: #ffb055; }
+.controls select {
+  flex: 1;
+  background: #222;
+  color: #d8d8d8;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.controls input[type=checkbox] {
+  width: 16px;
+  height: 16px;
+  accent-color: #ffb055;
+  cursor: pointer;
+}
+.controls input[type=number] {
+  width: 72px;
+  background: #222;
+  color: #d8d8d8;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 12px;
+}
+.controls button {
+  background: rgba(255, 165, 60, 0.15);
+  color: #ffb055;
+  border: 1px solid rgba(255, 165, 60, 0.35);
+  border-radius: 6px;
+  padding: 5px 0;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.controls button:hover { background: rgba(255, 165, 60, 0.28); }

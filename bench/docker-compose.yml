@@ -1,0 +1,95 @@
+# The benchmark stack: one nginx origin serving the COG over HTTP, and the two
+# tile servers reading it through range requests from the same place.
+#
+#   docker compose -f bench/docker-compose.yml up --build -d
+#   python3 bench/run.py
+#   docker compose -f bench/docker-compose.yml down
+#
+# BENCH_CPUS (an integer) and BENCH_MEM cap both servers identically and set
+# their worker counts: sabre's request threads and titiler's uvicorn workers.
+# TITILER_TAG pins the titiler image (default: latest).
+#
+# BENCH_BIND is the address the servers publish on, 127.0.0.1 by default. With
+# the load generator on a second droplet, set it to this box's *private* IP:
+#
+#     export BENCH_BIND=10.124.0.3
+#
+# Binding to the private interface rather than 0.0.0.0 keeps the benchmark
+# ports off the public one entirely, so their reachability does not depend on
+# the cloud firewall being right.
+
+x-limits: &limits
+  cpus: ${BENCH_CPUS:-4}
+  mem_limit: ${BENCH_MEM:-2g}
+
+services:
+  origin:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data:/data:ro
+      - ./out/logs:/var/log/bench
+    ports:
+      - "${BENCH_BIND:-127.0.0.1}:8081:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  sabre:
+    # Pulled on a benchmark box, built locally otherwise. `docker compose up`
+    # with no --build uses the image; `--build` rebuilds from source and tags
+    # it with the same name, so local development is unchanged.
+    #
+    # Pin the SHA tag on a benchmark box. A moving tag would quietly change
+    # what a result refers to:
+    #     export SABRE_IMAGE=ghcr.io/indawomaps/sabre-server:sha-1a2b3c4
+    image: ${SABRE_IMAGE:-sabre-server:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: server
+    environment:
+      SABRE_BIND: 0.0.0.0:8787
+      SABRE_THREADS: ${BENCH_CPUS:-4}
+      # The same budget as titiler's CPL_VSIL_CURL_CACHE_SIZE below. Set 0 to
+      # benchmark sabre without its page cache.
+      SABRE_CACHE_SIZE: ${SABRE_CACHE_SIZE:-200M}
+    ports:
+      - "${BENCH_BIND:-127.0.0.1}:8787:8787"
+    depends_on:
+      origin:
+        condition: service_healthy
+    <<: *limits
+
+  titiler:
+    image: ghcr.io/developmentseed/titiler:${TITILER_TAG:-latest}
+    command: python -m uvicorn titiler.application.main:app --host 0.0.0.0 --port 8000 --workers ${BENCH_CPUS:-4}
+    environment:
+      # titiler's own recommended production settings for remote COGs, spelled
+      # out so the run records them. HTTP/2 multiplexing has no effect against
+      # the HTTP/1.1 origin.
+      GDAL_CACHEMAX: "200"
+      CPL_VSIL_CURL_CACHE_SIZE: "200000000"
+      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+      GDAL_HTTP_MULTIPLEX: "YES"
+      GDAL_HTTP_VERSION: "2"
+      GDAL_INGESTED_BYTES_AT_OPEN: "32768"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "5000000"
+      PYTHONWARNINGS: ignore
+    volumes:
+      # Lets make_cog.py run inside the image, which ships rasterio. The image
+      # runs as uid 65532, so pass --user to write into a directory you own:
+      #   docker compose -f bench/docker-compose.yml run --rm --no-deps \
+      #       --user "$(id -u):$(id -g)" --entrypoint python titiler /bench/make_cog.py
+      - ./:/bench
+    ports:
+      - "${BENCH_BIND:-127.0.0.1}:8000:8000"
+    depends_on:
+      origin:
+        condition: service_healthy
+    <<: *limits

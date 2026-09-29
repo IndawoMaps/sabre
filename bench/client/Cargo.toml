@@ -1,0 +1,23 @@
+[package]
+name = "sabre-bench-client"
+version.workspace = true
+edition.workspace = true
+description = "Load generator for the sabre benchmark suite. Open- and closed-loop, with coordinated-omission correction."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "bench-client"
+path = "src/main.rs"
+
+[dependencies]
+# default-features = false leaves http2 out. The servers under test speak
+# HTTP/1.1, and h2 multiplexing would quietly decouple "concurrency" from
+# "connections", which is the one thing this tool exists to control.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

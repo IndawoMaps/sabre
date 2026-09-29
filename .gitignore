@@ -1,0 +1,44 @@
+# Build output
+target
+build
+node_modules
+dist
+.vite
+.wrangler
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Python
+.venv
+__pycache__
+.pytest_cache
+
+# Raster data — large, not source. Test fixtures are the exception. Local
+# rasters for `just serve` and `just native` go in data/.
+data/
+*.tif
+*.tiff
+*.aux.xml
+!crates/core/tests/fixtures/*.tiff
+!crates/core/tests/fixtures/*.tif
+
+# Block sets for the real-workload benchmarks, built by bench/make_blocks.py
+# from whatever field boundaries you point it at.
+bench/blocks/
+
+# Browser benchmark runs: numbers and screenshots, one folder per run.
+bench/browser/results/
+
+# wasm-bindgen output — build artifacts. `just browser` writes the copy the
+# bare-wasm examples load, `just npm` the package's.
+examples/wasm/pkg/
+packages/browser/wasm/
+# Copied in by each package's prepack, so the tarball carries the licence.
+packages/*/LICENSE.md
+
+# Written by CI to point chromedriver at the Chrome it installed. Lives in
+# the package directory because that is where wasm-bindgen-test-runner looks;
+# see .github/workflows/ci.yml.
+crates/browser/webdriver.json

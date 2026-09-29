@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>farm-scale: stream vs whole file</title>
+<style>body{font:13px/1.5 ui-monospace,monospace;margin:2rem}pre{background:#f6f6f6;padding:10px}</style>
+<h1>Farm scale — streaming vs fetching the whole file</h1>
+<p>A pan across four zoom levels over a farm-extent COG, served from object
+storage. Warm connection, medians of three. The question is whether a file
+this small is better streamed or taken whole.</p>
+<div id="out">running…</div>
+<pre id="log"></pre>
+<script type="module">
+import init, { Cog } from './pkg/sabre_browser.js';
+const log = s => document.getElementById('log').textContent += s + '\n';
+const REMOTE = 'https://sabre-bench-tf.nyc3.digitaloceanspaces.com/farm';
+const FILES = ['farm_2000', 'farm_5000'];
+
+// A pan over the farm: the tiles a user would actually pull up.
+const TILES = [];
+for (let z = 14; z <= 17; z++) {
+  const n = 2 ** z;
+  const x = Math.floor((25.5306 + 180) / 360 * n);
+  const lat = -33.3538 * Math.PI / 180;
+  const y = Math.floor((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n);
+  for (const [dx, dy] of [[0,0],[1,0],[0,1],[1,1]]) TILES.push([z, x+dx, y+dy]);
+}
+
+async function run(name, mode) {
+  const url = `${REMOTE}/${name}.tif?cb=${Math.random()}`;
+  const size = Number((await fetch(url, {method:'HEAD'})).headers.get('content-length'));
+  const cog = new Cog(url);
+  const t0 = performance.now();
+  if (mode === 'whole') await cog.preload();
+  const first = await cog.png(...TILES[0], '{"colormap":"viridis","min":0,"max":3000}');
+  const firstMs = performance.now() - t0;
+  const panStart = performance.now();
+  for (const t of TILES.slice(1)) await cog.png(...t, '{"colormap":"viridis","min":0,"max":3000}');
+  const panMs = performance.now() - panStart;
+  return { name, mode, sizeMB: +(size/1e6).toFixed(2), firstMs: +firstMs.toFixed(0),
+           panMs: +panMs.toFixed(0), totalMs: +(firstMs+panMs).toFixed(0),
+           requests: cog.requests, readMB: +(cog.bytes/1e6).toFixed(2),
+           readPct: +(100*cog.bytes/size).toFixed(0) };
+}
+
+(async () => {
+  await init();
+  // Warm the TLS connection first: whichever measurement runs first otherwise
+  // pays the handshake and looks slower for a reason that has nothing to do
+  // with the strategy being compared.
+  await fetch(`${REMOTE}/farm_2000.tif`, { headers: { Range: 'bytes=0-1023' } });
+  const rows = [];
+  const REPS = 3;
+  for (const f of FILES) for (const mode of ['stream', 'whole']) {
+    const runs = [];
+    for (let i = 0; i < REPS; i++) runs.push(await run(f, mode));
+    // Median of three, so one slow round trip does not decide it.
+    const med = k => runs.map(r => r[k]).sort((a,b)=>a-b)[REPS >> 1];
+    const r = { ...runs[0], firstMs: med('firstMs'), panMs: med('panMs'),
+                totalMs: med('totalMs') };
+    rows.push(r);
+    log(`${r.name.padEnd(12)} ${r.mode.padEnd(7)} ${String(r.sizeMB).padStart(6)} MB file | ` +
+        `first ${String(r.firstMs).padStart(5)} ms | pan ${String(r.panMs).padStart(5)} ms | ` +
+        `${String(r.requests).padStart(3)} req | read ${String(r.readMB).padStart(6)} MB ` +
+        `(${String(r.readPct).padStart(3)}% of file)`);
+  }
+  window.__rows = rows;
+  document.getElementById('out').textContent = 'done';
+})().catch(e => { document.getElementById('out').textContent = 'FAILED ' + e; window.__rows = {error:String(e)}; });
+</script>

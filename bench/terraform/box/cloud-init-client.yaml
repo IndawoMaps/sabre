@@ -1,0 +1,53 @@
+#cloud-config
+# The load-generator box. It runs bench-client and nothing else: no servers, no
+# dataset, no docker images to pull. Keeping it bare is the point -- anything
+# else running here would contend with the generator and show up as server
+# latency.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - rsync
+  # bench-client is built here from the pushed source, in a container, so the
+  # box needs no Rust toolchain of its own.
+  - docker.io
+
+write_files:
+  - path: /etc/apt/apt.conf.d/99-bench-no-auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Unattended-Upgrade "0";
+
+  - path: /etc/motd
+    content: |
+
+      sabre load generator.
+
+      Driven over ssh from the server box; there is normally nothing to do here.
+      The binary lives at /root/sabre/target/release/bench-client.
+
+  # The orchestrator on the server box authenticates as this key. It is
+  # restricted to that one box by the cloud firewall.
+  - path: /root/.ssh/authorized_keys.orchestrator
+    permissions: "0600"
+    content: |
+      ${orchestrator_public_key}
+
+runcmd:
+  - systemctl enable --now docker
+
+  # Appended rather than written over: the operator's own key is already here
+  # from the droplet's ssh_keys and must keep working.
+  - cat /root/.ssh/authorized_keys.orchestrator >> /root/.ssh/authorized_keys
+  - chmod 600 /root/.ssh/authorized_keys
+  - rm -f /root/.ssh/authorized_keys.orchestrator
+
+  # Timers waking up mid-run land in the percentiles as latency.
+  - systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer || true
+
+  - mkdir -p /root/sabre
+
+  - docker --version > /var/lib/cloud/bench-ready
