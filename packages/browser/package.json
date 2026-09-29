@@ -17,6 +17,13 @@
   ],
   "sideEffects": false,
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IndawoMaps/sabre.git",
+    "directory": "packages/browser"
+  },
+  "homepage": "https://github.com/IndawoMaps/sabre/tree/main/packages/browser#readme",
+  "bugs": "https://github.com/IndawoMaps/sabre/issues",
   "keywords": [
     "cog",
     "geotiff",

@@ -5,7 +5,7 @@ An Expo app showing GeoTIFFs from the device on a MapLibre map, fully offline
 colormap and stretch. It uses [`@sabremaps/react-native`](../../packages/react-native)
 from the workspace: `App.tsx` is the whole integration.
 
-Android only for now; the package's iOS side is not built yet.
+Android only; the package does not support iOS yet.
 
 ## Setup
 

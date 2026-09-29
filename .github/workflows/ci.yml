@@ -176,7 +176,7 @@ jobs:
     name: react-native package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
@@ -194,7 +194,7 @@ jobs:
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
             -o packages/react-native/android/src/main/jniLibs build -p sabre-mobile --release
           find packages/react-native/android/src/main/jniLibs -name '*.so' ! -name libsabre_mobile.so -delete
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
       - uses: actions/setup-node@v4
@@ -219,3 +219,12 @@ jobs:
           grep -q LICENSE.md contents
           # Only sabre's library: a dependency's stray cdylib would ship in every app.
           test "$(grep -c '\.so$' contents)" = 4
+          # iOS is not built yet, and a podspec without its framework breaks pod install.
+          ! grep -q '^package/ios/' contents
+      # The tarball exactly as a release would publish it, for trying it in an
+      # app, or for publishing by hand the first time (see CONTRIBUTING.md).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sabremaps-react-native
+          path: dist/sabremaps-react-native-*.tgz
+          if-no-files-found: error

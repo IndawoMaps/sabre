@@ -89,12 +89,20 @@ Nobody tags a release by hand. [release-please](https://github.com/googleapis/re
 keeps a PR open titled `chore(main): release x.y.z`, updated on every merge to `main`,
 with the next version and its changelog. Merging it is the release: the `release`
 workflow tags it, writes the GitHub release, attaches the Linux binaries, publishes
-`@sabremaps/browser` and `@sabremaps/ol` to npm, and tags the images `x.y.z` and
+`@sabremaps/browser`, `@sabremaps/ol` and `@sabremaps/react-native` to npm, and tags the images `x.y.z` and
 `latest`.
 
 Everything shares one version: the workspace `Cargo.toml`, the workspace crates in
-`Cargo.lock`, and both `package.json`s, as listed in `release-please-config.json`. A new
-npm package needs adding there.
+`Cargo.lock`, every package's `package.json`, and the React Native package's
+`build.gradle`, as listed in `release-please-config.json`. A new npm package needs adding
+there.
+
+npm publishes through trusted publishing: each package names this repo and `release.yml`
+as its trusted publisher on npmjs.com, so no token is stored. That setting only exists once
+the package does, so **a new package's first version is published by hand**. Download the
+tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`), run
+`npm publish <tarball> --access public`, then add the trusted publisher before the next
+release.
 
 Dependabot opens grouped minor/patch updates weekly. They are merged automatically once CI
 passes; majors wait for a human, who can opt one in with the `automerge` label.

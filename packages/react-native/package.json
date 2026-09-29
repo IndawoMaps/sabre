@@ -8,12 +8,18 @@
     "build",
     "android/build.gradle",
     "android/src",
-    "ios",
     "app.plugin.js",
     "expo-module.config.json",
     "LICENSE.md"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IndawoMaps/sabre.git",
+    "directory": "packages/react-native"
+  },
+  "homepage": "https://github.com/IndawoMaps/sabre/tree/main/packages/react-native#readme",
+  "bugs": "https://github.com/IndawoMaps/sabre/issues",
   "keywords": [
     "react-native",
     "expo",

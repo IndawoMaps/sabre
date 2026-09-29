@@ -5,9 +5,8 @@ map, from files on the device, restyled at runtime. No network, no pre-rendered
 tiles: sabre's tile server runs inside the app and renders each tile from the
 raster as MapLibre asks for it.
 
-> **Android only for now.** The iOS side is written but not yet built or
-> verified; on iOS the native module is absent and the component reports an
-> error through `onError`.
+> **Android only.** iOS is not supported yet: on iOS the native module is
+> absent, and the component reports that through `onError`.
 
 ```bash
 npx expo install @sabremaps/react-native @maplibre/maplibre-react-native

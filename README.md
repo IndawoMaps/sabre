@@ -422,7 +422,7 @@ import { SabreRasterSource } from '@sabremaps/react-native';
 
 See [packages/react-native](packages/react-native/README.md), and
 [examples/react-native](examples/react-native/README.md) for a running app. iOS is not
-built yet.
+supported yet.
 
 ## Using the library
 
