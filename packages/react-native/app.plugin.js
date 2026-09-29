@@ -19,6 +19,8 @@ const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 </network-security-config>
 `;
 
+const OURS = "@xml/network_security_config";
+
 function withSabreAndroid(config) {
   config = withDangerousMod(config, ["android", async (config) => {
     const dir = path.join(config.modRequest.platformProjectRoot, "app/src/main/res/xml");
@@ -28,7 +30,16 @@ function withSabreAndroid(config) {
   }]);
   return withAndroidManifest(config, (config) => {
     const app = config.modResults.manifest.application[0];
-    app.$["android:networkSecurityConfig"] = "@xml/network_security_config";
+    const existing = app.$["android:networkSecurityConfig"];
+    // An app with its own config would lose it silently if this replaced it.
+    if (existing && existing !== OURS) {
+      throw new Error(
+        `@sabremaps/react-native: this app already sets android:networkSecurityConfig to ${existing}. ` +
+        "Remove the plugin and add a <domain-config cleartextTrafficPermitted=\"true\"> for 127.0.0.1 " +
+        "to that file instead.",
+      );
+    }
+    app.$["android:networkSecurityConfig"] = OURS;
     return config;
   });
 }
