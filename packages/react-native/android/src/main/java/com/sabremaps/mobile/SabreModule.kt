@@ -47,7 +47,7 @@ class SabreModule : Module() {
     /** Names of the GeoTIFFs directly inside `fileRoot`, for a picker. */
     Function("listRasters") { fileRoot: String? ->
       File(fileRoot ?: defaultRoot).listFiles().orEmpty()
-        .filter { it.isFile && (it.name.endsWith(".tif") || it.name.endsWith(".tiff")) }
+        .filter { it.isFile && (it.name.endsWith(".tif", ignoreCase = true) || it.name.endsWith(".tiff", ignoreCase = true)) }
         .map { it.name }
         .sorted()
     }

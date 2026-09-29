@@ -99,7 +99,7 @@ pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoi
         .map_err(|e| format!("cannot bind 127.0.0.1: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    let endpoint = Endpoint { port, token: token() };
+    let endpoint = Endpoint { port, token: token()? };
     let app = Router::new()
         .nest(&format!("/{}", endpoint.token), sabre_server::router(backend))
         .layer(axum::middleware::map_response(no_store));
@@ -138,17 +138,12 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// 128 bits, hex. Random enough to keep other apps out of a loopback port
-/// without a dependency: `RandomState` is seeded from the OS per instance.
-fn token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let half = || {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u128(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        h.finish()
-    };
-    format!("{:016x}{:016x}", half(), half())
+/// 128 bits from the OS's secure random source, as hex. This is what keeps
+/// other apps out of a loopback port, so it is not left to a hasher's seed.
+fn token() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("cannot generate a token: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -165,6 +160,9 @@ mod tests {
         let health = reqwest::blocking::get(format!("{}/health", ep.base_url())).unwrap();
         assert_eq!(health.status(), 200);
         assert_eq!(health.headers()["cache-control"], "no-store");
+
+        assert_eq!(ep.token.len(), 32);
+        assert!(ep.token.bytes().all(|b| b.is_ascii_hexdigit()));
 
         let bare = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", ep.port)).unwrap();
         assert_eq!(bare.status(), 404, "routes need the token");
