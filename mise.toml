@@ -7,6 +7,13 @@ terraform = "latest"
 uv = "latest"
 android-sdk = "20.0"
 "cargo:cargo-ndk" = "latest"
+# CocoaPods, for the React Native example on iOS. Ruby is precompiled: built
+# from source it needs libyaml, which macOS does not have.
+ruby = "3.4"
+"gem:cocoapods" = "latest"
+
+[settings]
+ruby.compile = false
 
 [tasks.serve]
 description = 'serve local TIFF files with range-request support'

@@ -64,16 +64,25 @@ rn-android profile="release":
     @ls -la {{rn_package}}/android/src/main/jniLibs/*/
     pnpm --filter @sabremaps/react-native build
 
-# Build sabre-mobile for iOS (device + Apple silicon simulator) as SabreFFI.xcframework. Needs Xcode.
+# Build sabre-mobile for iOS (device + Apple silicon simulator) as SabreFFI.xcframework, then the package JS. Needs Xcode.
 rn-ios:
     rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-    cargo build -p sabre-mobile --release --target aarch64-apple-ios
-    cargo build -p sabre-mobile --release --target aarch64-apple-ios-sim
+    # Only the staticlib: built alongside the rlib, its dependencies stay LLVM
+    # bitcode (from LTO), which Xcode's older LLVM cannot link. Alone, rustc
+    # runs LTO itself and writes machine code. The paths are remapped as in
+    # rn-android, and CFLAGS does the same for ring's C in the debug info.
+    for target in aarch64-apple-ios aarch64-apple-ios-sim; do \
+        RUSTFLAGS="--remap-path-prefix={{justfile_directory()}}=sabre --remap-path-prefix=$HOME=~" \
+        CFLAGS="-ffile-prefix-map={{justfile_directory()}}=sabre -ffile-prefix-map=$HOME=~" \
+            cargo rustc -p sabre-mobile --release --target $target --crate-type staticlib; \
+    done
     rm -rf {{rn_package}}/ios/SabreFFI.xcframework
     xcodebuild -create-xcframework \
         -library target/aarch64-apple-ios/release/libsabre_mobile.a -headers crates/mobile/include \
         -library target/aarch64-apple-ios-sim/release/libsabre_mobile.a -headers crates/mobile/include \
         -output {{rn_package}}/ios/SabreFFI.xcframework
+    @du -sh {{rn_package}}/ios/SabreFFI.xcframework/*/
+    pnpm --filter @sabremaps/react-native build
 
 # Copy a raster into the Android example's files directory (debug builds only).
 rn-push-android file:
@@ -84,3 +93,11 @@ rn-push-android file:
 # Build the package, then build, install and launch the Android example.
 rn-example-android: rn-android
     cd examples/react-native && pnpm exec expo run:android
+
+# Copy a raster into the iOS example's Documents directory, on the booted simulator.
+rn-push-ios file:
+    cp {{file}} "$(xcrun simctl get_app_container booted com.sabremaps.example data)/Documents/"
+
+# Build the package, then build, install and launch the iOS example on a simulator.
+rn-example-ios: rn-ios
+    cd examples/react-native && pnpm exec expo run:ios

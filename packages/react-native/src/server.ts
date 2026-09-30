@@ -16,7 +16,8 @@ export interface Endpoint {
 export interface Options {
   /**
    * The directory local rasters are read from, and the only one. Default:
-   * the app's files directory on Android (`Paths.document` in expo-file-system).
+   * the app's files directory on Android and its Documents directory on iOS
+   * (`Paths.document` in expo-file-system, on both).
    */
   fileRoot?: string;
   /** Bytes of remote (`https://`) source data kept in memory. Default 64 MB. */

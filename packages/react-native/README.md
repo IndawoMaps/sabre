@@ -5,19 +5,22 @@ map, from files on the device, restyled at runtime. No network, no pre-rendered
 tiles: sabre's tile server runs inside the app and renders each tile from the
 raster as MapLibre asks for it.
 
-> **Android only.** iOS is not supported yet: on iOS the native module is
-> absent, and the component reports that through `onError`.
+Android and iOS (16.4 or later; on the simulator, Apple silicon Macs only).
 
 ```bash
 npx expo install @sabremaps/react-native @maplibre/maplibre-react-native
 ```
 
-Add the config plugin to `app.json`, then rebuild the app (`npx expo run:android`
-or a new dev client; Expo Go cannot load native code):
+Add the config plugin to `app.json`, then rebuild the app (`npx expo run:android`,
+`npx expo run:ios` or a new dev client; Expo Go cannot load native code):
 
 ```json
 { "expo": { "plugins": ["@maplibre/maplibre-react-native", "@sabremaps/react-native"] } }
 ```
+
+On Expo SDK 57 built with Xcode 27, iOS apps crash at launch unless they adopt the
+UIScene lifecycle, whatever native modules they use. SDK 58's template does; on 57, turn
+it on with `["expo-build-properties", { "ios": { "enableSceneSupport": true } }]`.
 
 The plugin lets the app talk plain HTTP to `127.0.0.1`, and to nowhere else, so
 MapLibre can reach the in-app server. Bare React Native apps need
@@ -49,7 +52,8 @@ function DemMap() {
 ## Where rasters come from
 
 Local rasters are read from one directory, the **file root**: the app's files
-directory by default (`Paths.document` in expo-file-system). Put GeoTIFFs there,
+directory on Android and its Documents directory on iOS by default (`Paths.document`
+in expo-file-system, on both). Put GeoTIFFs there,
 by downloading them, copying them out of the app bundle, or from a document
 picker, and name them by file name:
 

@@ -23,9 +23,9 @@ export function native(): SabreNativeModule {
   }
   if (!loaded) {
     throw new Error(
-      "@sabremaps/react-native: the native module is not in this build. It runs on Android " +
-      "for now; after installing it, rebuild the app (`expo run:android` or a new dev " +
-      "client) -- Expo Go cannot load it.",
+      "@sabremaps/react-native: the native module is not in this build. After installing " +
+      "it, rebuild the app (`expo run:android`, `expo run:ios` or a new dev client) -- " +
+      "Expo Go cannot load it.",
     );
   }
   return loaded;

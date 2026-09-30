@@ -35,9 +35,16 @@ public class SabreModule: Module {
       sabre_stop()
     }
 
+    /// Names of the GeoTIFFs directly inside `fileRoot`, for a picker.
     Function("listRasters") { (fileRoot: String?) -> [String] in
-      let names = (try? FileManager.default.contentsOfDirectory(atPath: fileRoot ?? self.defaultRoot)) ?? []
-      return names.filter { $0.hasSuffix(".tif") || $0.hasSuffix(".tiff") }.sorted()
+      let root = URL(fileURLWithPath: fileRoot ?? self.defaultRoot, isDirectory: true)
+      let urls = (try? FileManager.default.contentsOfDirectory(
+        at: root, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
+      return urls
+        .filter { ["tif", "tiff"].contains($0.pathExtension.lowercased()) }
+        .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+        .map { $0.lastPathComponent }
+        .sorted()
     }
   }
 }

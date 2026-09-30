@@ -5,9 +5,26 @@ An Expo app showing GeoTIFFs from the device on a MapLibre map, fully offline
 colormap and stretch. It uses [`@sabremaps/react-native`](../../packages/react-native)
 from the workspace: `App.tsx` is the whole integration.
 
-Android only; the package does not support iOS yet.
+## Setup: iOS
 
-## Setup
+Xcode, with an iOS simulator runtime. CocoaPods comes from the repo's
+`mise.toml`, with a prebuilt Ruby, since macOS's own is too old for it:
+
+```sh
+mise install
+```
+
+## Run on iOS
+
+```sh
+pnpm install
+just rn-example-ios                  # SabreFFI.xcframework + package JS, then expo run:ios
+just rn-push-ios data/ca.cog.tiff    # copy a raster into the booted simulator's app, then reload
+```
+
+`just rn-ios` rebuilds only the package's iOS library (after a change in `crates/`).
+
+## Setup: Android
 
 Toolchains come from the repo's `mise.toml` (JDK 17, Android cmdline-tools,
 cargo-ndk). The rest of the SDK goes into mise's `ANDROID_HOME`:
@@ -25,7 +42,7 @@ archives can be fetched with a resumable `curl -C -` from the URLs in
 `https://dl.google.com/android/repository/repository2-3.xml` and unpacked
 into `$ANDROID_HOME` by hand.
 
-## Run
+## Run on Android
 
 ```sh
 emulator -avd sabre &

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Camera, Map, type StyleSpecification } from "@maplibre/maplibre-react-native";
 import { listRasters, SabreRasterSource, type Style, useEndpoint, useRasterInfo } from "@sabremaps/react-native";
@@ -65,7 +65,7 @@ export default function App() {
     return (
       <Centered>
         <Text style={styles.text}>No .tif files in {endpoint.fileRoot}</Text>
-        <Text style={styles.hint}>Push one with `just rn-push-android data/ca.cog.tiff`</Text>
+        <Text style={styles.hint}>Push one with `just rn-push-{Platform.OS} data/ca.cog.tiff`</Text>
       </Centered>
     );
   }

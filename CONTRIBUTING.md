@@ -100,7 +100,8 @@ there.
 npm publishes through trusted publishing: each package names this repo and `release.yml`
 as its trusted publisher on npmjs.com, so no token is stored. That setting only exists once
 the package does, so **a new package's first version is published by hand**. Download the
-tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`), run
+tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`, with the
+iOS library the `react-native-ios` job built on macOS), run
 `npm publish <tarball> --access public`, then add the trusted publisher before the next
 release.
 
