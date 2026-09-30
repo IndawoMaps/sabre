@@ -1,6 +1,6 @@
 {
   "name": "@sabremaps/react-native",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Cloud-Optimized GeoTIFFs on a MapLibre React Native map, offline and restyled at runtime: sabre's tile server runs inside the app.",
   "main": "build/index.js",
   "types": "build/index.d.ts",

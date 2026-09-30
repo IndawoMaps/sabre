@@ -1365,7 +1365,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sabre-bench-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "sabre-browser"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "js-sys",
@@ -1390,14 +1390,14 @@ dependencies = [
 
 [[package]]
 name = "sabre-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "sabre-core",
 ]
 
 [[package]]
 name = "sabre-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "sabre-mobile"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "getrandom 0.2.17",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "sabre-server"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "axum",

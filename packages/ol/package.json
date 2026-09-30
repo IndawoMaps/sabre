@@ -1,6 +1,6 @@
 {
   "name": "@sabremaps/ol",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "An OpenLayers source for Cloud-Optimized GeoTIFFs, rendered in the browser by sabre.",
   "type": "module",
   "exports": {
