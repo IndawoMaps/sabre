@@ -1,5 +1,7 @@
 use crate::cog::{decode_tile, fetch_tile_ranges, CogMeta, RangeReader};
-use crate::geo::{bbox_to_pixel_window, reproject_bbox_from_wgs84, reproject_point_from_wgs84};
+use std::collections::HashMap;
+
+use crate::geo::{bbox_to_pixel_window, reproject_point_from_wgs84};
 use crate::mask::Mask;
 use crate::timing::{phase, Timings};
 use crate::render::{blit_tile, bytes_to_f32, overlapping_strip_indices, overlapping_tile_indices};
@@ -23,11 +25,71 @@ pub fn max_query_pixels(bands: usize) -> i64 {
     MAX_QUERY_BYTES / (bands.max(1) as i64 * std::mem::size_of::<f32>() as i64)
 }
 
-#[derive(Serialize)]
+/// Most distinct values `classes` will report. A categorical raster has a
+/// handful; a continuous one has a class per pixel, and a response listing
+/// four million of them is a mistake, not a summary.
+pub const MAX_CLASSES: usize = 1_000;
+
+#[derive(Serialize, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum QueryResult {
     Point   { value: f64 },
-    Polygon { min: f64, max: f64, avg: f64, stdev: f64 },
+    /// Zonal statistics, each cell weighted by the fraction of it the polygon
+    /// covers. The definitions are exactextract's, so the numbers can be
+    /// checked against it: `count` is its `count`, `sum` its `sum`, `avg`
+    /// its `mean`, `stdev` its `stdev`, `min` and `max` its `min` and `max`.
+    /// Those four are `null` when every covered cell is nodata.
+    Polygon {
+        min:   Option<f64>,
+        max:   Option<f64>,
+        avg:   Option<f64>,
+        stdev: Option<f64>,
+        /// Covered cells with data: the sum of their coverage fractions.
+        count: f64,
+        /// Coverage-weighted sum of their values.
+        sum:   f64,
+        /// Covered cells without data, measured the same way as `count`.
+        nodata_count: f64,
+        area:  Areas,
+        /// Per distinct value, when asked for.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        classes: Option<Vec<ClassStats>>,
+    },
+}
+
+/// How much of the polygon the raster covers, split by whether it has data.
+/// `total` is `data + nodata`, and is the polygon's own area wherever the
+/// polygon lies inside the raster.
+#[derive(Serialize, Debug)]
+pub struct Areas {
+    pub total:  f64,
+    pub data:   f64,
+    pub nodata: f64,
+    /// `cartesian`: coverage times the pixel's size in the raster's CRS
+    /// units -- square metres for UTM, exactextract's `area_cartesian`.
+    /// `spherical`: coverage times the pixel's area on a sphere of the WGS84
+    /// equatorial radius, for rasters in degrees -- its `area_spherical_m2`.
+    pub method: &'static str,
+}
+
+/// One distinct raster value under the polygon.
+#[derive(Serialize, Debug)]
+pub struct ClassStats {
+    pub value: f64,
+    /// Coverage fractions summed over the cells holding it.
+    pub count: f64,
+    /// `count` over the polygon's `count`: its share of the area that has
+    /// data, as exactextract's `frac`. Its share of the whole polygon,
+    /// nodata included, is `area / area.total`.
+    pub frac:  f64,
+    pub area:  f64,
+}
+
+/// Whether `v` is missing: NaN, or exactly the nodata value. Exact, as GDAL
+/// and exactextract compare -- a tolerance would swallow real values next
+/// to a small nodata like 0.
+fn is_nodata(v: f32, nodata: Option<f32>) -> bool {
+    v.is_nan() || nodata == Some(v)
 }
 
 pub async fn query_point(
@@ -91,21 +153,24 @@ pub async fn query_point(
         bytes_to_f32(&dec[off..off + bps], bits, sample_fmt)
     };
 
-    if value.is_nan() || nd.map(|n| (value - n).abs() < f32::EPSILON * 100.0).unwrap_or(false) {
+    if is_nodata(value, nd) {
         return Err("point is nodata".into());
     }
 
     Ok(QueryResult::Point { value: value as f64 })
 }
 
+/// Zonal statistics under `mask_wgs84`, with a breakdown by value when
+/// `classes` is set. See [`QueryResult::Polygon`].
 pub async fn query_polygon(
     mask_wgs84: &Mask,
     band: usize,
     nodata: Option<f32>,
+    classes: bool,
     reader: &dyn RangeReader,
     meta: &CogMeta,
 ) -> Result<QueryResult, String> {
-    query_polygon_timed(mask_wgs84, band, nodata, reader, meta, &Timings::off()).await
+    query_polygon_timed(mask_wgs84, band, nodata, classes, reader, meta, &Timings::off()).await
 }
 
 /// As [`query_polygon`], recording where the time went.
@@ -113,6 +178,7 @@ pub async fn query_polygon_timed(
     mask_wgs84: &Mask,
     band: usize,
     nodata: Option<f32>,
+    classes: bool,
     reader: &dyn RangeReader,
     meta: &CogMeta,
     t: &Timings,
@@ -125,11 +191,12 @@ pub async fn query_polygon_timed(
 
     let native_mask = t.time(phase::MASK, || mask_wgs84.to_native_crs(ifd.epsg_code))?;
 
-    let wgs84_bbox   = mask_wgs84.wgs84_bbox().ok_or("polygon is empty")?;
-    let native_bbox  = match ifd.epsg_code {
-        Some(epsg) => reproject_bbox_from_wgs84(&wgs84_bbox, epsg)?,
-        None       => wgs84_bbox,
-    };
+    // The window is every cell the reprojected polygon touches: bounded by its
+    // own vertices, since its edges are straight in this CRS. A bbox
+    // reprojected from WGS84 corners can fall a hair short of it, and a
+    // partly covered cell left outside is area lost.
+    // (`wgs84_bbox` is only the rings' extent, whatever CRS they are in.)
+    let native_bbox = native_mask.wgs84_bbox().ok_or("polygon is empty")?;
 
     let win = bbox_to_pixel_window(&gt, ifd.image_width, ifd.image_height, &native_bbox)
         .ok_or("polygon does not intersect raster")?;
@@ -190,89 +257,185 @@ pub async fn query_polygon_timed(
         }
     }
 
-    // Accumulate stats over pixels inside the polygon. Reprojecting the mask
-    // is folded in here rather than into `plan`: it scales with the geometry,
-    // not with the raster, which is the distinction worth being able to see.
-    //
-    // Which pixels are inside is settled by filling rows between the
-    // polygon's edges, in the window's own pixel grid, rather than by asking
-    // `contains` about each pixel centre: for a farm of 86 blocks over a few
-    // megapixels that per-pixel walk was nearly all of the query. The native
-    // geotransform is affine, so inverting it moves the vertices into the grid
-    // with every edge still straight, and inside stays exactly inside.
+    // Every cell is weighted by the fraction of it inside the polygon, so the
+    // cells along the boundary count for the part of them that is in it and
+    // the weights add up to the polygon's area. Reprojecting the mask is
+    // folded in with this rather than into `plan`: it scales with the
+    // geometry, not the raster, which is the distinction worth seeing.
     let stats_start = t.start();
-    let inside = window_coverage(&native_mask, gt, (win.x_off, win.y_off), mw, mh)?;
+    let cells = window_polygons(&native_mask, gt, (win.x_off, win.y_off))?;
+    let (cell_area, method) = cell_areas(gt, ifd.epsg_code, win.y_off, mh);
 
-    let mut count  = 0u64;
-    let mut sum    = 0f64;
-    let mut sum_sq = 0f64;
-    let mut min    = f64::MAX;
-    let mut max    = f64::MIN;
-
-    for (i, _) in inside.iter().enumerate().filter(|(_, &keep)| keep) {
-        let v = mosaic[i * samples + band];
-        if v.is_nan() || nd.map(|n| (v - n).abs() < f32::EPSILON * 100.0).unwrap_or(false) {
-            continue;
+    let mut acc = Accumulator::default();
+    let mut by_value: HashMap<u32, (f64, f64)> = HashMap::new();
+    crate::mask::coverage_rows(mw, mh, &cells, |row, col0, cover| {
+        let area = cell_area[row];
+        let values = &mosaic[(row * mw + col0) * samples..];
+        // A row's cells all have the same area, so it is applied per run.
+        let (mut data, mut missing) = (0.0, 0.0);
+        for (i, &c) in cover.iter().enumerate() {
+            let v = values[i * samples + band];
+            if is_nodata(v, nd) {
+                missing += c;
+                continue;
+            }
+            acc.value(v as f64, c);
+            data += c;
+            if classes && by_value.len() <= MAX_CLASSES {
+                // -0.0 and 0.0 are one class.
+                let e = by_value.entry((v + 0.0).to_bits()).or_default();
+                e.0 += c;
+                e.1 += c * area;
+            }
         }
-        let vf = v as f64;
-        count  += 1;
-        sum    += vf;
-        sum_sq += vf * vf;
-        if vf < min { min = vf; }
-        if vf > max { max = vf; }
-    }
-
+        acc.area += data * area;
+        acc.nodata_count += missing;
+        acc.nodata_area += missing * area;
+    });
     t.since(phase::STATS, stats_start);
 
-    if count == 0 {
-        return Err("no valid pixels found within polygon".into());
+    if acc.count + acc.nodata_count == 0.0 {
+        return Err("polygon covers no part of the raster".into());
     }
+    if by_value.len() > MAX_CLASSES {
+        return Err(format!(
+            "more than {MAX_CLASSES} distinct values under the polygon; classes= is for \
+             categorical rasters"));
+    }
+    let classes = classes.then(|| {
+        let mut out: Vec<ClassStats> = by_value.into_iter().map(|(bits, (count, area))| ClassStats {
+            value: f32::from_bits(bits) as f64,
+            count,
+            frac: count / acc.count,
+            area,
+        }).collect();
+        out.sort_by(|a, b| a.value.total_cmp(&b.value));
+        out
+    });
 
-    let avg   = sum / count as f64;
-    let stdev = ((sum_sq / count as f64) - avg * avg).max(0.0).sqrt();
-
-    Ok(QueryResult::Polygon { min, max, avg, stdev })
+    Ok(acc.finish(method, classes))
 }
 
-/// Which pixels of the `width`×`height` window at `offset` in the raster have
-/// their centre inside `native_mask`, which is in the raster's CRS.
-fn window_coverage(
+/// Coverage-weighted statistics, defined as exactextract defines them.
+///
+/// Summing squares and subtracting the squared mean loses everything to
+/// cancellation when the values are large and close together, as an
+/// elevation raster's are. exactextract avoids it with West's weighted
+/// update, which divides for every cell. Summing about a shift -- the first
+/// value seen -- avoids it just as well without the division: the shifted
+/// values are small, and what is squared is small.
+struct Accumulator {
+    count: f64,
+    sum: f64,
+    shift: Option<f64>,
+    /// Σ c(x − shift) and Σ c(x − shift)².
+    sum_d: f64,
+    sum_d2: f64,
+    min: f64,
+    max: f64,
+    area: f64,
+    nodata_count: f64,
+    nodata_area: f64,
+}
+
+impl Default for Accumulator {
+    fn default() -> Self {
+        Self {
+            count: 0.0, sum: 0.0, shift: None, sum_d: 0.0, sum_d2: 0.0,
+            min: f64::INFINITY, max: f64::NEG_INFINITY,
+            area: 0.0, nodata_count: 0.0, nodata_area: 0.0,
+        }
+    }
+}
+
+impl Accumulator {
+    fn value(&mut self, x: f64, c: f64) {
+        self.count += c;
+        self.sum += x * c;
+        let d = x - *self.shift.get_or_insert(x);
+        self.sum_d += c * d;
+        self.sum_d2 += c * d * d;
+        // Any cell the polygon covers at all, however little -- exactextract's
+        // min and max do not weigh coverage either.
+        self.min = self.min.min(x);
+        self.max = self.max.max(x);
+    }
+
+    fn finish(self, method: &'static str, classes: Option<Vec<ClassStats>>) -> QueryResult {
+        let some = self.count > 0.0;
+        QueryResult::Polygon {
+            min: some.then_some(self.min),
+            max: some.then_some(self.max),
+            avg: some.then_some(self.sum / self.count),
+            stdev: some.then(|| {
+                let mean_d = self.sum_d / self.count;
+                (self.sum_d2 / self.count - mean_d * mean_d).max(0.0).sqrt()
+            }),
+            count: self.count,
+            sum: self.sum,
+            nodata_count: self.nodata_count,
+            area: Areas {
+                total: self.area + self.nodata_area,
+                data: self.area,
+                nodata: self.nodata_area,
+                method,
+            },
+            classes,
+        }
+    }
+}
+
+/// `native_mask`'s rings in the coordinates of the window at `offset`:
+/// (0, 0) is the window's top-left corner and a cell is a unit square.
+fn window_polygons(
     native_mask: &Mask,
     gt: [f64; 6],
     offset: (i64, i64),
-    width: usize,
-    height: usize,
-) -> Result<Vec<bool>, String> {
+) -> Result<crate::mask::Polygons, String> {
     let [x0, pw, xr, y0, yr, ph] = gt;
     let det = pw * ph - xr * yr;
     if det == 0.0 || !det.is_finite() {
         return Err("COG geotransform cannot be inverted".into());
     }
     let (wx, wy) = (offset.0 as f64, offset.1 as f64);
+    // The geotransform is affine, so its inverse keeps edges straight and
+    // scales every area by the same 1/|det|: a cell's coverage fraction is
+    // the same measured here or in the raster's CRS.
     let to_cell = |(nx, ny): (f64, f64)| {
         let (dx, dy) = (nx - x0, ny - y0);
         ((dx * ph - dy * xr) / det - wx, (dy * pw - dx * yr) / det - wy)
     };
-    Ok(crate::mask::fill_grid(width, height, native_mask.rings().iter().map(|rings| {
+    Ok(native_mask.rings().iter().map(|rings| {
         rings.iter().map(|r| r.iter().copied().map(to_cell).collect()).collect()
-    })))
+    }).collect())
+}
+
+/// The ground area of one whole cell in each of the window's `rows`, and how
+/// it was measured.
+fn cell_areas(gt: [f64; 6], epsg: Option<u32>, y_off: i64, rows: usize) -> (Vec<f64>, &'static str) {
+    let [_, pw, xr, y0, yr, ph] = gt;
+    // No EPSG code is read as WGS84, as it is everywhere else here: the
+    // polygon is applied to such a raster unreprojected.
+    if matches!(epsg, None | Some(4326) | Some(4269)) {
+        // Degrees: a cell's area shrinks toward the poles. The band of a
+        // sphere between two latitudes, cut to the cell's width -- the
+        // formula exactextract uses, on the same radius.
+        const R: f64 = 6_378_137.0;
+        let (dlat, dlon) = (ph.abs().to_radians(), pw.abs().to_radians());
+        let areas = (0..rows).map(|r| {
+            let lat = (y0 + (y_off as f64 + r as f64 + 0.5) * ph).to_radians();
+            R * R * ((lat - dlat / 2.0).sin() - (lat + dlat / 2.0).sin()).abs() * dlon
+        }).collect();
+        (areas, "spherical")
+    } else {
+        (vec![(pw * ph - xr * yr).abs(); rows], "cartesian")
+    }
 }
 
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
     use crate::mask::parse_wkt_mask;
-
-    /// What the stats loop used to ask: `contains` at each pixel centre,
-    /// taken through the geotransform into the raster's CRS.
-    fn per_pixel(mask: &Mask, gt: [f64; 6], offset: (i64, i64), w: usize, h: usize) -> Vec<bool> {
-        let [x0, pw, xr, y0, yr, ph] = gt;
-        (0..w * h).map(|i| {
-            let col = offset.0 as f64 + (i % w) as f64 + 0.5;
-            let row = offset.1 as f64 + (i / w) as f64 + 0.5;
-            mask.contains(x0 + col * pw + row * xr, y0 + col * yr + row * ph)
-        }).collect()
-    }
 
     /// A closed star-shaped ring, as WKT: `(x y,…)`.
     fn star(cx: f64, cy: f64, r: f64, points: usize) -> String {
@@ -284,34 +447,35 @@ mod coverage_tests {
         format!("({})", pts.join(","))
     }
 
+    fn ring_area(ring: &[(f64, f64)]) -> f64 {
+        (0..ring.len()).map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            a.0 * b.1 - b.0 * a.1
+        }).sum::<f64>().abs() / 2.0
+    }
+
     #[test]
-    fn filled_rows_match_the_per_pixel_test() {
-        // UTM-like metres, 10 m pixels, and a geotransform rotated by a few
-        // degrees, which is the case the inverse has to get right.
+    fn coverage_through_the_geotransform_adds_up_to_the_polygon() {
+        // UTM-like metres, 10 m pixels, north-up and rotated by 3°.
         let (c, s) = (3f64.to_radians().cos(), 3f64.to_radians().sin());
         let north_up = [500_000.0, 10.0, 0.0, 6_300_000.0, 0.0, -10.0];
         let rotated = [500_000.0, 10.0 * c, 10.0 * s, 6_300_000.0, 10.0 * s, -10.0 * c];
-        let (cx, cy) = (501_500.0, 6_298_500.0);
-        // A star with a star-shaped hole, and two more overlapping it.
+        // Well inside a 700-cell window at either offset, rotated or not.
+        let (cx, cy) = (503_000.0, 6_297_000.0);
         let mask = parse_wkt_mask(&format!(
-            "MULTIPOLYGON(({},{}),({}),({}))",
-            star(cx, cy, 900.0, 7),
-            star(cx, cy, 300.0, 5),
-            star(cx + 700.0, cy + 200.0, 500.0, 4),
-            star(cx - 400.0, cy - 600.0, 350.0, 6),
+            "MULTIPOLYGON(({},{}),({}))",
+            star(cx, cy, 900.0, 7), star(cx, cy, 300.0, 5), star(cx - 1200.0, cy - 900.0, 250.0, 6),
         )).unwrap();
-        assert_eq!(mask.size().0, 3);
+        let rings = mask.rings();
+        let want = ring_area(&rings[0][0]) - ring_area(&rings[0][1]) + ring_area(&rings[1][0]);
 
         for (name, gt) in [("north up", north_up), ("rotated", rotated)] {
-            for offset in [(0, 0), (37, 91)] {
-                let (w, h) = (300, 280);
-                let got = window_coverage(&mask, gt, offset, w, h).unwrap();
-                let want = per_pixel(&mask, gt, offset, w, h);
-                let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
-                // Exact but for a centre within rounding of an edge, which
-                // the inverse transform can move to the other side.
-                assert!(differ <= 2, "{name} {offset:?}: {differ} pixels differ");
-                assert!(got.iter().filter(|&&v| v).count() > 1_000, "{name} {offset:?}: too little inside");
+            for offset in [(0, 0), (3, 4)] {
+                let cells = window_polygons(&mask, gt, offset).unwrap();
+                let mut total = 0.0;
+                crate::mask::coverage_rows(700, 700, &cells, |_, _, run| total += run.iter().sum::<f64>());
+                let got = total * 100.0; // 10 m × 10 m cells
+                assert!((got - want).abs() < 1e-6 * want, "{name} {offset:?}: {got} m² against {want}");
             }
         }
     }
@@ -319,7 +483,30 @@ mod coverage_tests {
     #[test]
     fn a_geotransform_that_cannot_be_inverted_is_an_error() {
         let mask = parse_wkt_mask("POLYGON((0 0,1 0,1 1,0 0))").unwrap();
-        assert!(window_coverage(&mask, [0.0, 1.0, 1.0, 0.0, 1.0, 1.0], (0, 0), 4, 4).is_err());
+        assert!(window_polygons(&mask, [0.0, 1.0, 1.0, 0.0, 1.0, 1.0], (0, 0)).is_err());
+    }
+
+    #[test]
+    fn degree_cells_shrink_toward_the_poles_and_metre_cells_do_not() {
+        let (areas, method) = cell_areas([0.0, 0.001, 0.0, 60.0, 0.0, -0.001], Some(4326), 0, 2);
+        assert_eq!(method, "spherical");
+        // 0.001° at 60°N on that sphere: 111.32 m × 55.66 m.
+        assert!((areas[0] - 6_196.0).abs() < 1.0, "{}", areas[0]);
+        assert!(areas[1] > areas[0], "further south, larger");
+
+        let (areas, method) = cell_areas([500_000.0, 10.0, 0.0, 6_300_000.0, 0.0, -10.0], Some(32735), 0, 3);
+        assert_eq!((areas, method), (vec![100.0; 3], "cartesian"));
+
+        // No EPSG code means WGS84 here, as it does for the polygon itself.
+        assert_eq!(cell_areas([0.0, 0.001, 0.0, 60.0, 0.0, -0.001], None, 0, 1).1, "spherical");
+    }
+
+    #[test]
+    fn nodata_is_nan_or_exactly_the_value() {
+        assert!(is_nodata(f32::NAN, None));
+        assert!(is_nodata(0.0, Some(0.0)));
+        assert!(!is_nodata(1e-6, Some(0.0)), "a small value next to nodata 0 is data");
+        assert!(!is_nodata(3.0, None));
     }
 }
 

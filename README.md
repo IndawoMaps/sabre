@@ -151,17 +151,59 @@ Samples raster values. Provide either `lat` + `lng` for a point, or `polygon` as
 | `lat`, `lng` | — | Point to sample, in WGS84 |
 | `polygon` | — | WKT polygon for zonal statistics, in WGS84 |
 | `band` | `0` | Zero-based band index |
-| `nodata` | from file | Values to exclude from statistics |
+| `nodata` | from file | Value to treat as missing, in addition to NaN |
+| `classes` | `false` | Polygon queries: add a breakdown by distinct value |
 
 ```bash
 curl "http://localhost:8787/query?url=https://example.com/dem.tif&lat=37.8&lng=-122.4"
 # {"kind":"point","value":52.0}
 
+# A 10 m land cover raster in UTM, about 10% of it cloud (nodata) under this polygon:
 curl --get "http://localhost:8787/query" \
-  --data-urlencode "url=https://example.com/dem.tif" \
-  --data-urlencode "polygon=POLYGON((-122.5 37.7,-122.3 37.7,-122.3 37.9,-122.5 37.9,-122.5 37.7))"
-# {"kind":"polygon","min":0.0,"max":281.0,"avg":47.3,"stdev":38.1}
+  --data-urlencode "url=https://example.com/landcover.tif" \
+  --data-urlencode "polygon=POLYGON((25.51 -33.37,25.53 -33.37,25.53 -33.36,25.51 -33.36,25.51 -33.37))" \
+  --data-urlencode "classes=true"
 ```
+
+```json
+{
+  "kind": "polygon",
+  "min": 1.0, "max": 6.0, "avg": 3.2322, "stdev": 1.721,
+  "count": 18614.8, "sum": 60166.4, "nodata_count": 2022.6,
+  "area": { "total": 2063733.3, "data": 1861475.1, "nodata": 202258.2, "method": "cartesian" },
+  "classes": [
+    { "value": 1.0, "count": 4049.3, "frac": 0.2175, "area": 404928.8 },
+    { "value": 2.0, "count": 3995.8, "frac": 0.2147, "area": 399576.4 },
+    …
+  ]
+}
+```
+
+Polygon statistics weight every pixel by the fraction of it the polygon covers, so a pixel
+half inside counts half, and the weights add up to the polygon's area. The definitions are
+[exactextract](https://github.com/isciences/exactextract)'s, and sabre is tested against it
+to within about 1e-8:
+
+| Field | Meaning | exactextract |
+| --- | --- | --- |
+| `count` | Sum of coverage fractions over pixels with data | `count` |
+| `sum` | Coverage-weighted sum of their values | `sum` |
+| `avg`, `stdev` | Coverage-weighted mean and population standard deviation | `mean`, `stdev` |
+| `min`, `max` | Over every pixel with data the polygon touches at all | `min`, `max` |
+| `nodata_count` | As `count`, over pixels without data | `count(default_value=…)` − `count` |
+| `area.total` | The polygon's area, where it lies over the raster, in m² | `count(default_value=…, coverage_weight=area_…)` |
+| `area.data`, `area.nodata` | Its split between pixels with data and without | `count(coverage_weight=area_…)` |
+| `classes[].frac` | A value's share of the area **with data** | `frac` |
+| `classes[].area` | A value's area in m²; its share of the **whole** polygon is `area / area.total` | |
+
+`min`, `max`, `avg` and `stdev` are `null` when every pixel under the polygon is nodata;
+the areas still say how much of it that was. Nodata is NaN or exactly the `nodata` value.
+
+Areas are `cartesian` — coverage × pixel width × height, exactextract's `area_cartesian` —
+for rasters in metres such as UTM, and `spherical` — its `area_spherical_m2` — for rasters
+in degrees. A Web Mercator raster's cartesian areas are Mercator's, inflated away from the
+equator; use a UTM or geographic source for area. `classes` is for categorical rasters
+and refuses more than 1,000 distinct values.
 
 `geometry_provider` and `geometry_id` name the polygon instead of carrying it — see
 [Naming a geometry](#naming-a-geometry-instead-of-sending-it).

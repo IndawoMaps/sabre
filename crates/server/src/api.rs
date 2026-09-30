@@ -50,6 +50,9 @@ pub struct QueryParams {
     #[serde(default)]
     pub band:    usize,
     pub nodata:  Option<f32>,
+    /// Polygon queries: add a breakdown by distinct value.
+    #[serde(default)]
+    pub classes: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,7 +140,7 @@ pub async fn query(reader: &dyn RangeReader, p: &QueryParams,
     };
     let result = match (&p.lat, &p.lng, &mask) {
         (Some(lat), Some(lng), _) => query_point(*lng, *lat, p.band, p.nodata, reader, &meta).await,
-        (_, _, Some(m))           => query_polygon_timed(m, p.band, p.nodata, reader, &meta, t).await,
+        (_, _, Some(m))           => query_polygon_timed(m, p.band, p.nodata, p.classes, reader, &meta, t).await,
         _ => Err("provide either lat+lng (point query), polygon=<WKT>, or \
                   geometry_provider with geometry_id".into()),
     };

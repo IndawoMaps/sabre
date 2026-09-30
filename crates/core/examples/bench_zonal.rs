@@ -39,7 +39,7 @@ fn main() {
         // production does.
         let mask = sabre_core::mask::parse_wkt_mask(wkt).expect("polygon");
         let t0 = Instant::now();
-        pollster::block_on(query_polygon(&mask, 0, cfg.nodata, &cfg.reader, &cfg.meta))
+        pollster::block_on(query_polygon(&mask, 0, cfg.nodata, false, &cfg.reader, &cfg.meta))
             .expect("query_polygon failed");
         times_ms.push(t0.elapsed().as_secs_f64() * 1_000.0);
     }

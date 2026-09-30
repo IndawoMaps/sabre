@@ -26,7 +26,7 @@ fn bench_query_polygon_size(c: &mut Criterion) {
         let mask = sabre_core::mask::parse_wkt_mask(&polys[0]).expect("polygon");
         group.bench_with_input(BenchmarkId::new("size", label), &mask, |b, mask| {
             b.iter(|| {
-                pollster::block_on(query_polygon(mask, 0, cfg.nodata, &cfg.reader, &cfg.meta)).ok()
+                pollster::block_on(query_polygon(mask, 0, cfg.nodata, false, &cfg.reader, &cfg.meta)).ok()
             })
         });
     }
@@ -51,7 +51,7 @@ fn bench_query_n_polygons(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &masks, |b, masks| {
             b.iter(|| {
                 for mask in masks {
-                    pollster::block_on(query_polygon(mask, 0, cfg.nodata, &cfg.reader, &cfg.meta)).ok();
+                    pollster::block_on(query_polygon(mask, 0, cfg.nodata, false, &cfg.reader, &cfg.meta)).ok();
                 }
             })
         });
@@ -76,7 +76,7 @@ fn bench_query_farm(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("query_farm");
     group.bench_function("farm_86", |b| {
-        b.iter(|| pollster::block_on(query_polygon(&farm, 0, Some(0.0), &reader, &meta)).expect("stats"))
+        b.iter(|| pollster::block_on(query_polygon(&farm, 0, Some(0.0), false, &reader, &meta)).expect("stats"))
     });
     group.finish();
 }
