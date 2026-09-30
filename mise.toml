@@ -1,4 +1,7 @@
 [tools]
+# 24, as the release workflow uses: its npm (11.19) has `npm stage`, which
+# approving a staged release needs -- 11.15 or later. See CONTRIBUTING.md#releases.
+node = "24"
 java = "temurin-17"
 just = "latest"
 pnpm = "latest"
