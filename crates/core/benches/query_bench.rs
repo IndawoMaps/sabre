@@ -60,5 +60,26 @@ fn bench_query_n_polygons(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_query_polygon_size, bench_query_n_polygons);
+/// Statistics over a whole farm at once -- 86 blocks as one geometry, as a
+/// multi-id `geometry_id` resolves to -- on a 1800×1800 raster of its own,
+/// large enough that the per-pixel work is what is measured.
+fn bench_query_farm(c: &mut Criterion) {
+    let (w, h, px) = (1800u32, 1800u32, 0.0001);
+    let pixels: Vec<f32> = (0..w * h).map(|i| (i % 997) as f32 + 1.0).collect();
+    let tiff = common::make_geotiff(&pixels, w, h, 20.0, -30.0, px, 0.0);
+    let reader = common::MemReader(tiff);
+    let meta = pollster::block_on(sabre_core::cog::fetch_meta(&reader)).expect("synthetic COG");
+    let extent = sabre_core::geo::Bbox {
+        west: 20.0, south: -30.0 - h as f64 * px, east: 20.0 + w as f64 * px, north: -30.0,
+    };
+    let farm = common::make_farm(&extent, 86);
+
+    let mut group = c.benchmark_group("query_farm");
+    group.bench_function("farm_86", |b| {
+        b.iter(|| pollster::block_on(query_polygon(&farm, 0, Some(0.0), &reader, &meta)).expect("stats"))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_query_polygon_size, bench_query_n_polygons, bench_query_farm);
 criterion_main!(benches);

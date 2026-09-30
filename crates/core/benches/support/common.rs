@@ -33,8 +33,10 @@ impl RangeReader for FileReader {
     async fn read_range(&self, offset: u64, length: u64) -> Result<Vec<u8>, String> {
         let mut f = std::fs::File::open(&self.0).map_err(|e| e.to_string())?;
         f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; length as usize];
-        f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        // Short at the end of the file, as an HTTP range is: the header read
+        // asks for more than a small COG has.
+        let mut buf = Vec::with_capacity(length as usize);
+        f.take(length).read_to_end(&mut buf).map_err(|e| e.to_string())?;
         Ok(buf)
     }
 }
@@ -189,6 +191,28 @@ pub fn make_polygons(extent: &Bbox, n: usize, size_deg: f64) -> Vec<String> {
 }
 
 // ── Synthetic fixture builder (mirrors make_geotiff in snapshot.rs) ───────────
+
+/// A farm: `n` blocks of 30 vertices on a grid across `extent`, each a
+/// wobbly circle, as one mask. The shape of the real block sets the geometry
+/// work was built for (86 blocks, ~30 vertices each).
+pub fn make_farm(extent: &Bbox, n: usize) -> sabre_core::mask::Mask {
+    let cols = (n as f64).sqrt().ceil() as usize;
+    let rows = n.div_ceil(cols);
+    let (w, h) = (extent.east - extent.west, extent.north - extent.south);
+    let r = (w / cols as f64).min(h / rows as f64) * 0.4;
+    let polygons = (0..n).map(|i| {
+        let cx = extent.west + w * ((i % cols) as f64 + 0.5) / cols as f64;
+        let cy = extent.south + h * ((i / cols) as f64 + 0.5) / rows as f64;
+        let mut ring: Vec<(f64, f64)> = (0..30).map(|k| {
+            let a = k as f64 / 30.0 * std::f64::consts::TAU;
+            let j = 1.0 + 0.2 * ((k * 7 + i) as f64).sin();
+            (cx + r * j * a.cos(), cy + r * j * a.sin())
+        }).collect();
+        ring.push(ring[0]);
+        vec![ring]
+    }).collect();
+    sabre_core::mask::Mask::from_rings(polygons)
+}
 
 pub fn make_geotiff(
     pixels: &[f32],

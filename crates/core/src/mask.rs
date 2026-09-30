@@ -1,5 +1,4 @@
 use crate::geo::epsg_to_proj4;
-use crate::warp::TileWarp;
 
 /// A clip geometry: one or more polygons, each with an exterior ring and
 /// optional holes.
@@ -175,28 +174,130 @@ pub fn parse_wkt_mask(wkt: &str) -> Result<Mask, String> {
     }
 }
 
-/// Set pixels outside the mask to NaN (which all style functions render as transparent).
-/// The mask must be in the raster's CRS, the one `warp` maps into, so each
-/// pixel is tested exactly where `rasterize_to_tile` drew it from.
-pub fn apply_mask(
-    resampled: &mut [f32],
-    tile_size: u32,
-    samples: usize,
-    warp: &TileWarp,
-    mask: &Mask,
-) {
+/// Set pixels of the Web Mercator tile `z/x/y` whose centres fall outside
+/// `mask` to NaN, which every style draws transparent. `mask` is WGS84.
+///
+/// This used to reproject the mask into the raster's CRS and ask
+/// [`Mask::contains`] about every pixel through the tile's warp: for a farm,
+/// 65,536 point-in-polygon tests against 86 polygons, plus the reprojection,
+/// on every tile -- about 3 ms each, and half again the cost of the rest of
+/// the render. The tile's own pixel grid is simpler to work in. Mercator from
+/// lon/lat is a closed form, so the vertices go straight into pixel space and
+/// [`fill_grid`] fills the rows between their edges.
+///
+/// Edges are straight in Mercator here where they were straight in the
+/// raster's CRS before. Across a field boundary's edges the two differ by far
+/// less than a pixel.
+pub fn apply_mask(resampled: &mut [f32], tile_size: u32, samples: usize, z: u32, x: u32, y: u32, mask: &Mask) {
     let n = tile_size as usize;
-    for oy in 0..n {
-        for ox in 0..n {
-            let (x, y) = warp.at(ox as f64 + 0.5, oy as f64 + 0.5);
-            if !mask.contains(x, y) {
-                let px = (oy * n + ox) * samples;
-                for s in 0..samples {
-                    resampled[px + s] = f32::NAN;
+    let inside = coverage(n, z, x, y, mask);
+    for (px, &keep) in resampled.chunks_exact_mut(samples).zip(&inside) {
+        if !keep {
+            px.fill(f32::NAN);
+        }
+    }
+}
+
+/// Which pixels of the `n`×`n` tile `z/x/y` have their centre inside `mask`.
+fn coverage(n: usize, z: u32, x: u32, y: u32, mask: &Mask) -> Vec<bool> {
+    let to_px = tile_pixels(n, z, x, y);
+    let tile = crate::geo::tile_to_bbox(z, x, y);
+    let near = mask.polygons.iter().zip(&mask.bounds)
+        .filter(|(_, &(w, s, e, nth))| !(e < tile.west || w > tile.east || nth < tile.south || s > tile.north))
+        .map(|(rings, _)| rings.iter().map(|r| r.iter().copied().map(&to_px).collect()).collect());
+    fill_grid(n, n, near)
+}
+
+/// Which cells of a `width`×`height` grid have their centre inside any of
+/// `polygons`, whose rings are already in the grid's coordinates: (0, 0) is
+/// the top-left corner of the first cell, and cells are one unit square.
+///
+/// Scanline: each row's centre line crosses some edges; sorted, consecutive
+/// pairs of crossings bound the spans inside, and the spans are filled rather
+/// than every cell tested. A cell is inside exactly when [`Mask::contains`]
+/// would say so of its centre in the same coordinates: the same half-open
+/// rule picks which edges a row crosses, and a centre on a span's left end is
+/// in and on its right end is out, which is what counting crossings strictly
+/// to the right of it gives. Polygons union -- each is filled even-odd over
+/// its own rings, as `contains` does.
+pub(crate) fn fill_grid(
+    width: usize,
+    height: usize,
+    polygons: impl IntoIterator<Item = Vec<Vec<(f64, f64)>>>,
+) -> Vec<bool> {
+    let mut inside = vec![false; width * height];
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut active: Vec<Edge> = Vec::new();
+    let mut xs: Vec<f64> = Vec::new();
+    for rings in polygons {
+        edges.clear();
+        for pts in &rings {
+            for i in 0..pts.len() {
+                // The closing edge too, as `ring_crossings` walks it: a ring
+                // written closed adds a zero-length edge, which crosses nothing.
+                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                if a.1 != b.1 {
+                    edges.push(Edge { a, b, top: a.1.min(b.1), bottom: a.1.max(b.1) });
+                }
+            }
+        }
+        edges.sort_by(|p, q| p.top.total_cmp(&q.top));
+
+        // Rows whose centre is on or below the top edge and above the bottom.
+        let first = edges.first().map_or(0.0, |e| (e.top - 0.5).ceil().max(0.0)) as usize;
+        let mut next = 0;
+        active.clear();
+        for row in first..height {
+            let yc = row as f64 + 0.5;
+            while next < edges.len() && edges[next].top <= yc {
+                active.push(edges[next]);
+                next += 1;
+            }
+            active.retain(|e| e.bottom > yc);
+            if active.is_empty() {
+                if next == edges.len() {
+                    break;
+                }
+                continue;
+            }
+            xs.clear();
+            // The same expression as `ring_crossings`, so a centre that lies
+            // exactly on an edge is decided the same way.
+            xs.extend(active.iter().map(|e| e.a.0 + (yc - e.a.1) / (e.b.1 - e.a.1) * (e.b.0 - e.a.0)));
+            xs.sort_by(f64::total_cmp);
+            let line = &mut inside[row * width..(row + 1) * width];
+            for span in xs.chunks_exact(2) {
+                // Centres c = col + 0.5 with span[0] <= c < span[1].
+                let from = (span[0] - 0.5).ceil().clamp(0.0, width as f64) as usize;
+                let to = (span[1] - 0.5).ceil().clamp(0.0, width as f64) as usize;
+                if from < to {
+                    line[from..to].fill(true);
                 }
             }
         }
     }
+    inside
+}
+
+/// WGS84 lon/lat to pixel coordinates in the `n`-pixel Web Mercator tile
+/// `z/x/y`, with (0, 0) its top-left corner.
+fn tile_pixels(n: usize, z: u32, x: u32, y: u32) -> impl Fn((f64, f64)) -> (f64, f64) {
+    let world = 2f64.powi(z as i32) * n as f64;
+    let (x0, y0) = (x as f64 * n as f64, y as f64 * n as f64);
+    move |(lon, lat)| {
+        // Mercator stops short of the poles; a vertex past it would be infinite.
+        let lat = lat.clamp(-85.051_128_779_806_59, 85.051_128_779_806_59).to_radians();
+        ((lon + 180.0) / 360.0 * world - x0,
+         (0.5 - lat.tan().asinh() / (2.0 * std::f64::consts::PI)) * world - y0)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Edge {
+    a: (f64, f64),
+    b: (f64, f64),
+    top: f64,
+    bottom: f64,
 }
 
 /// Extract the contents of each top-level `(...)` group within `s`.
@@ -275,4 +376,116 @@ fn ring_crossings(ring: &[(f64, f64)], lon: f64, lat: f64) -> usize {
         }
     }
     crossings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const N: usize = 256;
+    const TILE: (u32, u32, u32) = (16, 37414, 39214);
+
+    /// Pixel-space point in the tile, as WGS84.
+    fn lonlat(px: f64, py: f64) -> (f64, f64) {
+        let (z, x, y) = TILE;
+        let world = 2f64.powi(z as i32) * N as f64;
+        let (mx, my) = ((x as f64 * N as f64 + px) / world, (y as f64 * N as f64 + py) / world);
+        (mx * 360.0 - 180.0,
+         (std::f64::consts::PI * (1.0 - 2.0 * my)).sinh().atan().to_degrees())
+    }
+
+    /// Build a WGS84 mask from polygons written in tile pixels.
+    fn mask(polygons: &[Vec<Vec<(f64, f64)>>]) -> Mask {
+        Mask::from_rings(polygons.iter().map(|rings| rings.iter()
+            .map(|r| r.iter().map(|&(px, py)| lonlat(px, py)).collect()).collect()).collect())
+    }
+
+    fn fill(m: &Mask) -> Vec<bool> {
+        let (z, x, y) = TILE;
+        coverage(N, z, x, y, m)
+    }
+
+    /// What `contains` says of every pixel centre, asked in pixel space with
+    /// the vertices projected exactly as `coverage` projects them.
+    fn reference(m: &Mask) -> Vec<bool> {
+        let (z, x, y) = TILE;
+        let to_px = tile_pixels(N, z, x, y);
+        let px = Mask::from_rings(m.rings().iter().map(|rings| rings.iter()
+            .map(|r| r.iter().copied().map(&to_px).collect()).collect()).collect());
+        (0..N * N).map(|i| px.contains((i % N) as f64 + 0.5, (i / N) as f64 + 0.5)).collect()
+    }
+
+    fn star(cx: f64, cy: f64, r: f64, points: usize, closed: bool) -> Vec<(f64, f64)> {
+        let mut ring: Vec<(f64, f64)> = (0..points * 2).map(|k| {
+            let a = k as f64 / (points * 2) as f64 * std::f64::consts::TAU;
+            let r = if k % 2 == 0 { r } else { r * 0.4 };
+            (cx + r * a.cos(), cy + r * a.sin())
+        }).collect();
+        if closed {
+            ring.push(ring[0]);
+        }
+        ring
+    }
+
+    #[test]
+    fn spans_agree_with_contains_pixel_for_pixel() {
+        let cases: Vec<(&str, Vec<Vec<Vec<(f64, f64)>>>)> = vec![
+            ("concave star", vec![vec![star(128.0, 128.0, 100.0, 7, true)]]),
+            ("unclosed ring", vec![vec![star(100.0, 90.0, 60.0, 5, false)]]),
+            ("hole", vec![vec![star(128.0, 128.0, 120.0, 9, true), star(128.0, 128.0, 50.0, 4, true)]]),
+            ("overlapping polygons union", vec![
+                vec![star(100.0, 128.0, 80.0, 6, true)],
+                vec![star(160.0, 128.0, 80.0, 6, true)],
+            ]),
+            ("off every edge of the tile", vec![vec![star(128.0, 128.0, 400.0, 5, true)]]),
+            ("vertices on pixel centres and edges on rows", vec![vec![vec![
+                (10.5, 10.5), (200.5, 10.5), (200.5, 100.0), (120.5, 100.0),
+                (120.5, 180.5), (10.5, 180.5), (10.5, 10.5),
+            ]]]),
+        ];
+        for (name, polygons) in cases {
+            let m = mask(&polygons);
+            let (got, want) = (fill(&m), reference(&m));
+            let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "{name}: {differ} pixels differ");
+            assert!(got.iter().any(|&v| v), "{name}: nothing inside");
+        }
+    }
+
+    #[test]
+    fn spans_agree_with_contains_asked_in_wgs84() {
+        // What the renderer asked before: each pixel centre as lon/lat. Edges
+        // are straight in a different space there, so a pixel whose centre
+        // is within a hair of an edge could go either way -- but only those.
+        let m = mask(&[
+            vec![star(128.0, 128.0, 110.0, 7, true), star(128.0, 128.0, 30.0, 5, true)],
+            vec![star(40.0, 40.0, 35.0, 3, true)],
+        ]);
+        let got = fill(&m);
+        let differ = (0..N * N).filter(|&i| {
+            let (lon, lat) = lonlat((i % N) as f64 + 0.5, (i / N) as f64 + 0.5);
+            got[i] != m.contains(lon, lat)
+        }).count();
+        assert!(differ <= 2, "{differ} pixels differ");
+    }
+
+    #[test]
+    fn a_mask_elsewhere_clears_the_tile_and_one_around_it_keeps_all_of_it() {
+        let away = mask(&[vec![star(128.0 + 5_000.0, 128.0, 50.0, 5, true)]]);
+        assert!(fill(&away).iter().all(|&v| !v));
+        let around = mask(&[vec![vec![(-10.0, -10.0), (300.0, -10.0), (300.0, 300.0), (-10.0, 300.0)]]]);
+        assert!(fill(&around).iter().all(|&v| v));
+    }
+
+    #[test]
+    fn apply_mask_clears_every_sample_outside() {
+        let m = mask(&[vec![vec![(0.0, 0.0), (128.0, 0.0), (128.0, 256.0), (0.0, 256.0)]]]);
+        let mut data = vec![1.0f32; N * N * 3];
+        let (z, x, y) = TILE;
+        apply_mask(&mut data, N as u32, 3, z, x, y, &m);
+        for (i, px) in data.chunks_exact(3).enumerate() {
+            let left = i % N < 128;
+            assert!(px.iter().all(|v| v.is_nan() != left), "pixel {i}: {px:?}");
+        }
+    }
 }

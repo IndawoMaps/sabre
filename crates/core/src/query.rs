@@ -193,33 +193,33 @@ pub async fn query_polygon_timed(
     // Accumulate stats over pixels inside the polygon. Reprojecting the mask
     // is folded in here rather than into `plan`: it scales with the geometry,
     // not with the raster, which is the distinction worth being able to see.
+    //
+    // Which pixels are inside is settled by filling rows between the
+    // polygon's edges, in the window's own pixel grid, rather than by asking
+    // `contains` about each pixel centre: for a farm of 86 blocks over a few
+    // megapixels that per-pixel walk was nearly all of the query. The native
+    // geotransform is affine, so inverting it moves the vertices into the grid
+    // with every edge still straight, and inside stays exactly inside.
     let stats_start = t.start();
-    let [x0, pw, xr, y0, yr, ph] = gt;
+    let inside = window_coverage(&native_mask, gt, (win.x_off, win.y_off), mw, mh)?;
+
     let mut count  = 0u64;
     let mut sum    = 0f64;
     let mut sum_sq = 0f64;
     let mut min    = f64::MAX;
     let mut max    = f64::MIN;
 
-    for my in 0..mh {
-        for mx in 0..mw {
-            let v = mosaic[(my * mw + mx) * samples + band];
-            if v.is_nan() || nd.map(|n| (v - n).abs() < f32::EPSILON * 100.0).unwrap_or(false) {
-                continue;
-            }
-            // Pixel centre in native CRS
-            let col = (win.x_off as f64) + mx as f64 + 0.5;
-            let row = (win.y_off as f64) + my as f64 + 0.5;
-            let nx  = x0 + col * pw + row * xr;
-            let ny  = y0 + col * yr + row * ph;
-            if !native_mask.contains(nx, ny) { continue; }
-            let vf = v as f64;
-            count  += 1;
-            sum    += vf;
-            sum_sq += vf * vf;
-            if vf < min { min = vf; }
-            if vf > max { max = vf; }
+    for (i, _) in inside.iter().enumerate().filter(|(_, &keep)| keep) {
+        let v = mosaic[i * samples + band];
+        if v.is_nan() || nd.map(|n| (v - n).abs() < f32::EPSILON * 100.0).unwrap_or(false) {
+            continue;
         }
+        let vf = v as f64;
+        count  += 1;
+        sum    += vf;
+        sum_sq += vf * vf;
+        if vf < min { min = vf; }
+        if vf > max { max = vf; }
     }
 
     t.since(phase::STATS, stats_start);
@@ -232,6 +232,95 @@ pub async fn query_polygon_timed(
     let stdev = ((sum_sq / count as f64) - avg * avg).max(0.0).sqrt();
 
     Ok(QueryResult::Polygon { min, max, avg, stdev })
+}
+
+/// Which pixels of the `width`×`height` window at `offset` in the raster have
+/// their centre inside `native_mask`, which is in the raster's CRS.
+fn window_coverage(
+    native_mask: &Mask,
+    gt: [f64; 6],
+    offset: (i64, i64),
+    width: usize,
+    height: usize,
+) -> Result<Vec<bool>, String> {
+    let [x0, pw, xr, y0, yr, ph] = gt;
+    let det = pw * ph - xr * yr;
+    if det == 0.0 || !det.is_finite() {
+        return Err("COG geotransform cannot be inverted".into());
+    }
+    let (wx, wy) = (offset.0 as f64, offset.1 as f64);
+    let to_cell = |(nx, ny): (f64, f64)| {
+        let (dx, dy) = (nx - x0, ny - y0);
+        ((dx * ph - dy * xr) / det - wx, (dy * pw - dx * yr) / det - wy)
+    };
+    Ok(crate::mask::fill_grid(width, height, native_mask.rings().iter().map(|rings| {
+        rings.iter().map(|r| r.iter().copied().map(to_cell).collect()).collect()
+    })))
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::mask::parse_wkt_mask;
+
+    /// What the stats loop used to ask: `contains` at each pixel centre,
+    /// taken through the geotransform into the raster's CRS.
+    fn per_pixel(mask: &Mask, gt: [f64; 6], offset: (i64, i64), w: usize, h: usize) -> Vec<bool> {
+        let [x0, pw, xr, y0, yr, ph] = gt;
+        (0..w * h).map(|i| {
+            let col = offset.0 as f64 + (i % w) as f64 + 0.5;
+            let row = offset.1 as f64 + (i / w) as f64 + 0.5;
+            mask.contains(x0 + col * pw + row * xr, y0 + col * yr + row * ph)
+        }).collect()
+    }
+
+    /// A closed star-shaped ring, as WKT: `(x y,…)`.
+    fn star(cx: f64, cy: f64, r: f64, points: usize) -> String {
+        let pts: Vec<String> = (0..=points * 2).map(|k| {
+            let a = (k % (points * 2)) as f64 / (points * 2) as f64 * std::f64::consts::TAU;
+            let r = if k % 2 == 0 { r } else { r * 0.45 };
+            format!("{} {}", cx + r * a.cos(), cy + r * a.sin())
+        }).collect();
+        format!("({})", pts.join(","))
+    }
+
+    #[test]
+    fn filled_rows_match_the_per_pixel_test() {
+        // UTM-like metres, 10 m pixels, and a geotransform rotated by a few
+        // degrees, which is the case the inverse has to get right.
+        let (c, s) = (3f64.to_radians().cos(), 3f64.to_radians().sin());
+        let north_up = [500_000.0, 10.0, 0.0, 6_300_000.0, 0.0, -10.0];
+        let rotated = [500_000.0, 10.0 * c, 10.0 * s, 6_300_000.0, 10.0 * s, -10.0 * c];
+        let (cx, cy) = (501_500.0, 6_298_500.0);
+        // A star with a star-shaped hole, and two more overlapping it.
+        let mask = parse_wkt_mask(&format!(
+            "MULTIPOLYGON(({},{}),({}),({}))",
+            star(cx, cy, 900.0, 7),
+            star(cx, cy, 300.0, 5),
+            star(cx + 700.0, cy + 200.0, 500.0, 4),
+            star(cx - 400.0, cy - 600.0, 350.0, 6),
+        )).unwrap();
+        assert_eq!(mask.size().0, 3);
+
+        for (name, gt) in [("north up", north_up), ("rotated", rotated)] {
+            for offset in [(0, 0), (37, 91)] {
+                let (w, h) = (300, 280);
+                let got = window_coverage(&mask, gt, offset, w, h).unwrap();
+                let want = per_pixel(&mask, gt, offset, w, h);
+                let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+                // Exact but for a centre within rounding of an edge, which
+                // the inverse transform can move to the other side.
+                assert!(differ <= 2, "{name} {offset:?}: {differ} pixels differ");
+                assert!(got.iter().filter(|&&v| v).count() > 1_000, "{name} {offset:?}: too little inside");
+            }
+        }
+    }
+
+    #[test]
+    fn a_geotransform_that_cannot_be_inverted_is_an_error() {
+        let mask = parse_wkt_mask("POLYGON((0 0,1 0,1 1,0 0))").unwrap();
+        assert!(window_coverage(&mask, [0.0, 1.0, 1.0, 0.0, 1.0, 1.0], (0, 0), 4, 4).is_err());
+    }
 }
 
 #[cfg(test)]
