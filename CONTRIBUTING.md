@@ -102,7 +102,11 @@ the `Publish` environment as its trusted publisher on npmjs.com, so no token is 
 The publisher is limited to staged publishing, so the release only *stages* each package.
 Nothing is public until a maintainer approves it with 2FA: `npm stage list`, then
 `npm stage approve <id>` for each, or approve them on npmjs.com. Approve
-`@sabremaps/browser` before `@sabremaps/ol`, which depends on it. That setting only exists once
+`@sabremaps/browser` before `@sabremaps/ol`, which depends on it.
+
+If a release's npm job fails, stage that release again with
+`gh workflow run release.yml -f tag=vX.Y.Z`. It builds the tagged code with the workflow as
+it is now; re-running the failed job would repeat the workflow as it was at the release. That setting only exists once
 the package does, so **a new package's first version is published by hand**. Download the
 tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`, with the
 iOS library the `react-native-ios` job built on macOS), run
