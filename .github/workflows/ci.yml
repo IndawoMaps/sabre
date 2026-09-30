@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a PR makes the run for the old one pointless, so it is
+# cancelled. Runs on main are grouped by commit instead, so none is ever
+# cancelled: each is the only check of what that merge produced.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -74,29 +81,6 @@ jobs:
           "${{ steps.chrome.outputs.chrome-path }}" --version
           cargo test -p sabre-browser --target wasm32-unknown-unknown
 
-      # Release too: the size numbers only mean anything with LTO applied, and
-      # a member manifest's [profile.release] is silently ignored, so this is
-      # also what proves the workspace-root profile is the one in effect.
-      - name: Build the bundle
-        run: |
-          cargo build -p sabre-browser --target wasm32-unknown-unknown --release
-          wasm-bindgen --target web --out-dir examples/wasm/pkg --no-typescript \
-            target/wasm32-unknown-unknown/release/sabre_browser.wasm
-
-      - name: Report bundle size
-        run: |
-          raw=$(stat -c%s examples/wasm/pkg/sabre_browser_bg.wasm)
-          br=$(brotli -q 11 -c examples/wasm/pkg/sabre_browser_bg.wasm | wc -c)
-          printf '| | bytes | \n| --- | --- |\n| wasm | %s |\n| brotli | %s |\n' \
-            "$(numfmt --grouping $raw)" "$(numfmt --grouping $br)" >> "$GITHUB_STEP_SUMMARY"
-          # A budget rather than a target: the client path stops being worth it
-          # if the decoder costs more than the imagery. Raise it deliberately.
-          limit=$((300 * 1024))
-          if [ "$br" -gt "$limit" ]; then
-            echo "::error::brotli bundle is $br bytes, over the $limit budget"
-            exit 1
-          fi
-
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -112,6 +96,9 @@ jobs:
 
   docker:
     name: docker image
+    # PRs only. On main, release.yml builds and pushes the same Dockerfile, so
+    # a check here would be the same build a second time.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -156,6 +143,24 @@ jobs:
           cargo build -p sabre-browser --target wasm32-unknown-unknown --release
           wasm-bindgen --target web --out-dir packages/browser/wasm --no-typescript \
             target/wasm32-unknown-unknown/release/sabre_browser.wasm
+
+      # Measured here, on the release build the package ships: the size numbers
+      # only mean anything with LTO applied, and a member manifest's
+      # [profile.release] is silently ignored, so this is also what proves the
+      # workspace-root profile is the one in effect.
+      - name: Report bundle size
+        run: |
+          raw=$(stat -c%s packages/browser/wasm/sabre_browser_bg.wasm)
+          br=$(brotli -q 11 -c packages/browser/wasm/sabre_browser_bg.wasm | wc -c)
+          printf '| | bytes | \n| --- | --- |\n| wasm | %s |\n| brotli | %s |\n' \
+            "$(numfmt --grouping $raw)" "$(numfmt --grouping $br)" >> "$GITHUB_STEP_SUMMARY"
+          # A budget rather than a target: the client path stops being worth it
+          # if the decoder costs more than the imagery. Raise it deliberately.
+          limit=$((300 * 1024))
+          if [ "$br" -gt "$limit" ]; then
+            echo "::error::brotli bundle is $br bytes, over the $limit budget"
+            exit 1
+          fi
       - run: pnpm install --frozen-lockfile
       # The example imports @sabremaps/ol, so this is the check that a bundler
       # still finds the worker and the wasm inside the packages.
