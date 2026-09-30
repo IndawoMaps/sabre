@@ -148,9 +148,41 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release-please.outputs.tag }}" dist/* --clobber
 
+  ios:
+    name: iOS library
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - name: Build sabre-mobile as SabreFFI.xcframework
+        # As `just rn-ios`.
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=sabre --remap-path-prefix=/Users/runner=~
+          CFLAGS: -ffile-prefix-map=${{ github.workspace }}=sabre -ffile-prefix-map=/Users/runner=~
+        run: |
+          for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo rustc -p sabre-mobile --release --target $target --crate-type staticlib
+          done
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libsabre_mobile.a -headers crates/mobile/include \
+            -library target/aarch64-apple-ios-sim/release/libsabre_mobile.a -headers crates/mobile/include \
+            -output packages/react-native/ios/SabreFFI.xcframework
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sabre-ffi-xcframework
+          path: packages/react-native/ios/SabreFFI.xcframework
+          if-no-files-found: error
+
   npm:
     name: npm publish
-    needs: release-please
+    needs: [release-please, ios]
     if: needs.release-please.outputs.created == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -164,11 +196,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown,aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli
+          tool: wasm-bindgen-cli,cargo-ndk
       - uses: pnpm/action-setup@v6
         with:
           version: 11
@@ -189,6 +221,21 @@ jobs:
           wasm-bindgen --target web --out-dir packages/browser/wasm --no-typescript \
             target/wasm32-unknown-unknown/release/sabre_browser.wasm
 
+      - name: Build sabre-mobile into @sabremaps/react-native
+        # As `just rn-android`, keeping only sabre's own library.
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=sabre --remap-path-prefix=/home/runner=~
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
+            -o packages/react-native/android/src/main/jniLibs build -p sabre-mobile --release
+          find packages/react-native/android/src/main/jniLibs -name '*.so' ! -name libsabre_mobile.so -delete
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sabre-ffi-xcframework
+          path: packages/react-native/ios/SabreFFI.xcframework
+
       - run: pnpm install --frozen-lockfile
 
       # pnpm packs, since it rewrites @sabremaps/ol's `workspace:^` into the
@@ -197,9 +244,12 @@ jobs:
       - name: Publish
         run: |
           mkdir -p dist
-          for p in browser ol; do
+          for p in browser ol react-native; do
             (cd packages/$p && pnpm pack --pack-destination ../../dist)
           done
           tar tzf dist/sabremaps-browser-*.tgz | grep -q wasm/sabre_browser_bg.wasm
+          test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'libsabre_mobile\.so$')" = 4
+          test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'SabreFFI\.xcframework/.*/libsabre_mobile\.a$')" = 2
           npm publish dist/sabremaps-browser-*.tgz --access public
           npm publish dist/sabremaps-ol-*.tgz --access public
+          npm publish dist/sabremaps-react-native-*.tgz --access public

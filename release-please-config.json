@@ -24,7 +24,9 @@
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(!@.source)].version" },
         { "type": "json", "path": "packages/browser/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/ol/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "packages/ol/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/react-native/package.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": "packages/react-native/android/build.gradle" }
       ]
     }
   }

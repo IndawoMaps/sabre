@@ -1,0 +1,31 @@
+[package]
+name = "sabre-mobile"
+version.workspace = true
+edition.workspace = true
+description = "sabre inside a mobile app: the tile server on 127.0.0.1, for MapLibre Native to read offline COGs."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[lib]
+# cdylib for Android (loaded with System.loadLibrary), staticlib for iOS
+# (linked into the app; Apple does not allow loading your own dylibs).
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+sabre-server = { path = "../server" }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+serde_json = "1"
+# Already in the tree through rustls, so the token costs no new code.
+getrandom = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }

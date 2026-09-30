@@ -1,0 +1,4 @@
+module SabreFFI {
+    header "sabre.h"
+    export *
+}

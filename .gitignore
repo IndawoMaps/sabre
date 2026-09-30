@@ -38,6 +38,14 @@ packages/browser/wasm/
 # Copied in by each package's prepack, so the tarball carries the licence.
 packages/*/LICENSE.md
 
+# @sabremaps/react-native: native libraries built from crates/mobile by
+# `just rn-android` / `just rn-ios`, and its compiled JS. Shipped in the
+# tarball, not the repo.
+packages/react-native/android/src/main/jniLibs/
+packages/react-native/android/build/
+packages/react-native/ios/SabreFFI.xcframework/
+packages/react-native/build/
+
 # Written by CI to point chromedriver at the Chrome it installed. Lives in
 # the package directory because that is where wasm-bindgen-test-runner looks;
 # see .github/workflows/ci.yml.

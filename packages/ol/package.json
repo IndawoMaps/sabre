@@ -15,6 +15,13 @@
   ],
   "sideEffects": false,
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IndawoMaps/sabre.git",
+    "directory": "packages/ol"
+  },
+  "homepage": "https://github.com/IndawoMaps/sabre/tree/main/packages/ol#readme",
+  "bugs": "https://github.com/IndawoMaps/sabre/issues",
   "keywords": [
     "openlayers",
     "ol",
