@@ -146,6 +146,18 @@ pub trait Backend: Clone + Send + Sync + 'static {
         ids: Vec<String>,
         auth: Option<String>,
     ) -> impl Future<Output = Result<std::sync::Arc<sabre_core::mask::Mask>, geometry::Error>> + Send;
+
+    /// Geometry held in this process -- a [`sabre_core::geometry::GeometryStore`]
+    /// the app fills -- named the same way a provider's is. `None`, the
+    /// default, means the backend holds none, and names go to
+    /// [`geometry`](Self::geometry). `Some` is the answer, found or not: an
+    /// app's own store is not a fallback to try before asking elsewhere.
+    ///
+    /// `ids` have been through [`geometry::parse_ids`].
+    fn local_geometry(&self, _provider: &str, _ids: &[String])
+        -> Option<Result<std::sync::Arc<sabre_core::mask::Mask>, String>> {
+        None
+    }
 }
 
 // ── Geometry references ───────────────────────────────────────────────────────
@@ -204,6 +216,11 @@ async fn resolve_geometry<B: Backend>(
         return Err(ApiResponse::bad_request(format!(
             "{param} and geometry_provider both name a clip geometry; send one or the other")));
     }
+    let ids = geometry::parse_ids(ids).map_err(ApiResponse::bad_request)?;
+
+    if let Some(found) = backend.local_geometry(provider_name, &ids) {
+        return found.map(Some).map_err(|m| ApiResponse::text(StatusCode::NOT_FOUND, m));
+    }
 
     let registry = backend.geometry();
     let Some(provider) = registry.get(provider_name) else {
@@ -214,7 +231,6 @@ async fn resolve_geometry<B: Backend>(
                     registry.names().join(", "))
         }));
     };
-    let ids = geometry::parse_ids(ids).map_err(ApiResponse::bad_request)?;
 
     match backend.resolve_geometry(provider.clone(), ids, auth).await {
         Ok(mask) => Ok(Some(mask)),

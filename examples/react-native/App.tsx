@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Camera, Map, type StyleSpecification } from "@maplibre/maplibre-react-native";
-import { listRasters, SabreRasterSource, type Style, useEndpoint, useRasterInfo } from "@sabremaps/react-native";
+import {
+  geometries, listRasters, queryRaster, SabreRasterSource, type Style, useEndpoint, useRasterInfo,
+} from "@sabremaps/react-native";
 
 // Nothing but a background: the point is that the map works with no network.
 const OFFLINE_STYLE: StyleSpecification = {
@@ -14,6 +16,30 @@ const OFFLINE_STYLE: StyleSpecification = {
 const COLORMAPS = ["viridis", "turbo", "spectral", "rdylbu", "greys", "hot"];
 const MODES = ["colormap", "hillshade", "classified"] as const;
 type Mode = (typeof MODES)[number];
+const CLIPS = ["no clip", "fields", "fields shrunk"] as const;
+type Clip = (typeof CLIPS)[number];
+
+type Extent = { west: number; south: number; east: number; north: number };
+
+/**
+ * Nine fields on a 3×3 grid over the raster, each a diamond `size` of its
+ * cell across -- half as WKT, half as GeoJSON, since the store takes both.
+ */
+function fields(e: Extent, size: number): Record<string, string | object> {
+  const out: Record<string, string | object> = {};
+  const cw = (e.east - e.west) / 3;
+  const ch = (e.north - e.south) / 3;
+  for (let i = 0; i < 9; i++) {
+    const cx = e.west + cw * ((i % 3) + 0.5);
+    const cy = e.south + ch * (Math.floor(i / 3) + 0.5);
+    const [rx, ry] = [(cw * size) / 2, (ch * size) / 2];
+    const ring = [[cx, cy - ry], [cx + rx, cy], [cx, cy + ry], [cx - rx, cy], [cx, cy - ry]];
+    out[`field-${i + 1}`] = i % 2 === 0
+      ? `POLYGON((${ring.map(([x, y]) => `${x} ${y}`).join(",")}))`
+      : { type: "Polygon", coordinates: [ring] };
+  }
+  return out;
+}
 
 export default function App() {
   const { endpoint, error: startError } = useEndpoint();
@@ -28,6 +54,11 @@ export default function App() {
   // way to see a restyle change something other than the palette.
   const [stretch, setStretch] = useState(1);
 
+  // Clip to fields put in once and named, rather than sent with every tile.
+  const [clip, setClip] = useState<Clip>("no clip");
+  const [fieldIds, setFieldIds] = useState<string[]>();
+  const [fieldStats, setFieldStats] = useState<string>();
+
   useEffect(() => {
     if (!endpoint) return;
     const found = listRasters();
@@ -35,7 +66,37 @@ export default function App() {
     setFile(found[0]);
   }, [endpoint]);
 
+  useEffect(() => {
+    if (!file || !info?.extent || clip === "no clip") {
+      setFieldIds(undefined);
+      setFieldStats(undefined);
+      return;
+    }
+    let live = true;
+    const shapes = fields(info.extent, clip === "fields" ? 0.8 : 0.4);
+    const ids = Object.keys(shapes);
+    // Replacing bumps the revision, which is what redraws the map.
+    geometries.replace("fields", shapes)
+      .then(() => {
+        if (live) setFieldIds(ids);
+        return queryRaster(file, { geometry_provider: "fields", geometry_id: ids });
+      })
+      .then((r) => {
+        if (!live || r.kind !== "polygon") return;
+        const nodata = (100 * r.area.nodata) / r.area.total;
+        setFieldStats(`${ids.length} fields · ${(r.area.total / 1e4).toFixed(1)} ha · `
+          + `${nodata.toFixed(1)}% nodata · mean ${r.avg?.toFixed(1) ?? "–"}`);
+      })
+      .catch((e: Error) => live && setFieldStats(e.message));
+    return () => { live = false; };
+  }, [file, info, clip]);
+
   const style = useMemo<Style | undefined>(() => {
+    const drawn = draw();
+    return drawn && fieldIds ? { ...drawn, geometry_provider: "fields", geometry_id: fieldIds } : drawn;
+  }, [info, mode, colormap, stretch, fieldIds]);
+
+  function draw(): Style | undefined {
     if (!info) return undefined;
     const lo = info.stats_min ?? 0;
     const hi = lo + ((info.stats_max ?? 255) - lo) * stretch;
@@ -53,7 +114,7 @@ export default function App() {
         ] };
       }
     }
-  }, [info, mode, colormap, stretch]);
+  }
 
   if (error) {
     return <Centered><Text style={styles.error}>{error.message}</Text></Centered>;
@@ -88,6 +149,8 @@ export default function App() {
         {mode !== "classified" && <Chips options={COLORMAPS} value={colormap} onChange={setColormap} />}
         <Chips options={["25%", "50%", "100%"]} value={`${stretch * 100}%`}
                onChange={(s) => setStretch(parseInt(s, 10) / 100)} />
+        <Chips options={[...CLIPS]} value={clip} onChange={(c) => setClip(c as Clip)} />
+        {fieldStats && <Text style={styles.hint}>{fieldStats}</Text>}
         {info && (
           <Text style={styles.hint}>
             {info.width}×{info.height} {info.dtype} · {info.stats_min?.toFixed(1)}–{info.stats_max?.toFixed(1)} · port {endpoint.port}

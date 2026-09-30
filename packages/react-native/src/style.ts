@@ -32,9 +32,22 @@ export interface Style {
   interpolation?: "nearest" | "bilinear";
   /** WKT polygon or multipolygon in WGS84; pixels outside it are transparent. */
   mask?: string;
+  /**
+   * Clip to geometry put in with `geometries.set()` instead of a `mask`: the
+   * provider it was put under, and one or more of its ids. Several ids clip
+   * to their union. Not with `mask`.
+   */
+  geometry_provider?: string;
+  geometry_id?: GeometryId;
 }
 
+/** One geometry id, or several. */
+export type GeometryId = string | number | Array<string | number>;
+
 export function query(params: Record<string, unknown>): string {
+  // Several geometry ids go as the comma-separated list the server takes.
+  const ids = params.geometry_id;
+  if (Array.isArray(ids)) params = { ...params, geometry_id: ids.join(",") };
   return Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== null)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(typeof v === "object" ? JSON.stringify(v) : String(v))}`)

@@ -94,10 +94,43 @@ API and [`@sabremaps/browser`](https://www.npmjs.com/package/@sabremaps/browser)
 | `rgb_min_r` … `rgb_max_b` | `0` … `255` | `rgb`: per-channel black and white points |
 | `interpolation` | nearest | `bilinear` for smooth resampling |
 | `mask` | | WKT polygon in WGS84; pixels outside it are transparent |
+| `geometry_provider`, `geometry_id` | | Clip to geometry put in with `geometries` (below) instead of a `mask` |
 
 Changing `style` redraws the visible tiles. MapLibre builds a raster source once
 and ignores later changes to its tiles, so the component remounts the source
 under the same ids; layers placed relative to it with `beforeId` stay put.
+
+## Clipping to fields
+
+A `mask` goes in the tile URL, on every tile MapLibre asks for, and a farm's
+worth of fields is more than a URL can hold. Put the geometry in once and name
+it instead:
+
+```tsx
+import { geometries, SabreRasterSource } from "@sabremaps/react-native";
+
+await geometries.set("blocks", { 19519: blockGeoJson, 19520: "POLYGON((…))" });
+
+<SabreRasterSource id="ndvi" source="ndvi.tif"
+  style={{ colormap: "rdylgn", geometry_provider: "blocks", geometry_id: [19519, 19520] }} />
+```
+
+`set()` adds or overwrites the ids it names and leaves the rest; `replace()`
+swaps the provider's whole contents in one step, and `replace(provider, {})`
+empties it; `delete()` removes ids. Geometry is WGS84, as WKT or GeoJSON text or
+a GeoJSON object. Several ids clip to their union, and an id that is not there
+is an error rather than a tile drawn without it.
+
+Each change resolves to the provider's new revision, and a
+`<SabreRasterSource>` whose style names that provider redraws. For your own
+sources, `useGeometryRevision(provider)` gives the revision as state, and
+`geometries.subscribe()` calls back on every change. `queryRaster(source,
+{ geometry_provider, geometry_id })` gives zonal statistics for named geometry.
+
+Geometry stays in the app's memory for as long as it runs, including when the
+server restarts on returning to the foreground; it is not saved to disk. The
+names are those of a sabre server's geometry providers, so a style that works
+against one works here.
 
 ## API
 
@@ -121,12 +154,16 @@ raster's size, data type, nodata, EPSG code, WGS84 `extent` and `center`, and
 
 **`info(source)`** is the same as a promise. **`queryRaster(source, { lng, lat })`**
 reads the value at a point, and **`queryRaster(source, { polygon })`** gives
-statistics inside a WKT polygon: min, max, mean and standard deviation, and the
+statistics inside a WKT polygon, or inside named geometry with
+`{ geometry_provider, geometry_id }`: min, max, mean and standard deviation, and the
 polygon's area in m² split between pixels with data and nodata. Pixels the
 boundary cuts count for the part of them inside, as in exactextract. With
 `{ classes: true }` it adds each distinct value's share and area, for land
 cover and other categorical rasters. See the server's `/query` documentation
 for every field.
+
+**`geometries`** and **`useGeometryRevision(provider)`**: see
+[Clipping to fields](#clipping-to-fields).
 
 **`listRasters()`** lists the GeoTIFFs directly inside the file root.
 

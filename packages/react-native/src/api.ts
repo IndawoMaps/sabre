@@ -1,5 +1,5 @@
 import { type Endpoint, getEndpoint } from "./server";
-import { query, type Style } from "./style";
+import { query, type GeometryId, type Style } from "./style";
 
 /**
  * A raster to read: a file name inside the file root (`"dem.tif"`), a
@@ -94,10 +94,16 @@ export type QueryResult =
       classes?: ClassStats[];
     };
 
-/** The value at a WGS84 point, or statistics inside a WKT polygon. */
+/**
+ * The value at a WGS84 point, or statistics inside a polygon: WKT, or
+ * geometry put in with `geometries.set()`, named by provider and ids.
+ */
 export function queryRaster(
   source: Source,
-  at: { lng: number; lat: number } | { polygon: string },
+  at:
+    | { lng: number; lat: number }
+    | { polygon: string }
+    | { geometry_provider: string; geometry_id: GeometryId },
   options: { band?: number; nodata?: number; classes?: boolean } = {},
 ): Promise<QueryResult> {
   return get("query", { url: source, ...at, ...options });

@@ -17,6 +17,9 @@
 //! and MapLibre would otherwise keep a copy of every tile of every style in
 //! its on-disk ambient cache, for a source that is already on the device.
 //!
+//! Clip geometry is put in over the same server, under the same token, and
+//! kept for the life of the process -- see [`geometry`].
+//!
 //! The platforms call in through [`ffi`] (a C ABI, for iOS) and, on Android,
 //! the JNI functions in `android`.
 
@@ -31,6 +34,7 @@ use sabre_server::native::{NativeBackend, NativeConfig};
 use tokio::sync::oneshot;
 
 pub mod ffi;
+pub mod geometry;
 #[cfg(target_os = "android")]
 mod android;
 
@@ -60,8 +64,9 @@ static SERVER: Mutex<Option<Running>> = Mutex::new(None);
 /// Start the server, or return the one already running.
 ///
 /// A second call with the same `file_root` returns the running server's
-/// endpoint, so a screen can call this on mount without tracking whether
-/// another did. A call with a different root restarts it. `cache_bytes` bounds
+/// endpoint, if it still answers, so a screen can call this on mount without
+/// tracking whether another did. A server that no longer answers is replaced
+/// by a new one, on a new port. A call with a different root restarts it. `cache_bytes` bounds
 /// sabre's page cache; local files skip it today, so it only matters for
 /// `https://` sources.
 pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoint, String> {
@@ -69,9 +74,11 @@ pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoi
     let mut server = SERVER.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(running) = server.as_ref() {
-        // A thread that has finished has lost its listener -- on iOS, the
-        // system reclaims the socket of a suspended app -- so start afresh.
-        if running.file_root == file_root && !running.thread.is_finished() {
+        // On iOS the system reclaims a suspended app's sockets. The server's
+        // thread does not end when that happens -- axum logs the failed
+        // accept and tries again, forever -- so a live thread proves nothing.
+        // Ask the server itself.
+        if running.file_root == file_root && !running.thread.is_finished() && answers(&running.endpoint) {
             return Ok(running.endpoint.clone());
         }
     }
@@ -100,8 +107,9 @@ pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoi
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     let endpoint = Endpoint { port, token: token()? };
+    let routes = sabre_server::router(geometry::MobileBackend(backend)).merge(geometry::routes());
     let app = Router::new()
-        .nest(&format!("/{}", endpoint.token), sabre_server::router(backend))
+        .nest(&format!("/{}", endpoint.token), routes)
         .layer(axum::middleware::map_response(no_store));
 
     let (shutdown, stopped) = oneshot::channel::<()>();
@@ -138,6 +146,29 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
+/// Whether the server at `ep` answers its own health check.
+///
+/// A request, not just a connection: on Android any app can bind a loopback
+/// port, and once ours is gone another could be listening on it. Only our
+/// server answers under our token.
+fn answers(ep: &Endpoint) -> bool {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let timeout = Duration::from_millis(500);
+    let Ok(mut conn) = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], ep.port).into(), timeout) else {
+        return false;
+    };
+    let _ = conn.set_read_timeout(Some(timeout));
+    let _ = conn.set_write_timeout(Some(timeout));
+    let request = format!("GET /{}/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", ep.token);
+    if conn.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut head = [0u8; 12];
+    conn.read_exact(&mut head).is_ok() && &head == b"HTTP/1.1 200"
+}
+
 /// 128 bits from the OS's secure random source, as hex. This is what keeps
 /// other apps out of a loopback port, so it is not left to a hasher's seed.
 fn token() -> Result<String, String> {
@@ -167,7 +198,76 @@ mod tests {
         let bare = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", ep.port)).unwrap();
         assert_eq!(bare.status(), 404, "routes need the token");
 
+        assert!(answers(&ep), "a running server answers its health check");
+        let impostor = Endpoint { port: ep.port, token: "0".repeat(32) };
+        assert!(!answers(&impostor), "only under its own token");
+
+        geometry_is_put_in_once_and_named_after(&ep, &root);
+
         stop();
         assert!(reqwest::blocking::get(format!("{}/health", ep.base_url())).is_err());
+    }
+
+    fn geometry_is_put_in_once_and_named_after(ep: &Endpoint, root: &PathBuf) {
+        let http = reqwest::blocking::Client::new();
+        let send = |method: reqwest::Method, base: &str, body: &str| {
+            http.request(method, format!("{base}/geometries/blocks")).body(body.to_string()).send().unwrap()
+        };
+        let revision = |r: reqwest::blocking::Response| -> u64 {
+            assert_eq!(r.status(), 200, "{:?}", r.text());
+            let v: serde_json::Value = serde_json::from_str(&r.text().unwrap()).unwrap();
+            v["revision"].as_u64().unwrap()
+        };
+        // Over the Sentinel-2 fixture's tile 16/37414/39214: a square at its
+        // centre as WKT, and a larger one as GeoJSON.
+        let (w, s, e, n) = (25.5306, -33.3574, 25.5322, -33.3561);
+        let square = format!("POLYGON(({w} {s},{e} {s},{e} {n},{w} {n},{w} {s}))");
+        let (w2, s2, e2, n2) = (25.528, -33.359, 25.534, -33.354);
+        let geojson = format!(r#"{{"type":"Polygon","coordinates":[[[{w2},{s2}],[{e2},{s2}],[{e2},{n2}],[{w2},{n2}],[{w2},{s2}]]]}}"#);
+        let tile = |ids: &str| http.get(format!(
+            "{}/tiles/16/37414/39214?url=file://s2_b04_predictor2.tif&max=600&geometry_provider=blocks&geometry_id={ids}",
+            ep.base_url())).send().unwrap().status();
+
+        let r1 = revision(send(reqwest::Method::POST, &ep.base_url(),
+            &format!(r#"{{"a": "{square}", "b": {geojson}}}"#)));
+        assert_eq!(tile("a"), 200);
+        assert_eq!(tile("a,b"), 200);
+
+        let q = http.get(format!(
+            "{}/query?url=file://s2_b04_predictor2.tif&geometry_provider=blocks&geometry_id=a",
+            ep.base_url())).send().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&q.text().unwrap()).unwrap();
+        assert!(v["count"].as_f64().unwrap() > 0.0, "{v}");
+
+        // A bad entry is refused, and the good one sent with it is not applied.
+        let bad = send(reqwest::Method::POST, &ep.base_url(), r#"{"c": "POLYGON((1 2))", "d": "POLYGON((0 0,1 0,1 1,0 0))"}"#);
+        assert_eq!(bad.status(), 400);
+        assert!(bad.text().unwrap().contains("geometry c"));
+        assert_eq!(tile("d"), 404);
+
+        // Without the token the geometry routes are not there either.
+        let bare = http.post(format!("http://127.0.0.1:{}/geometries/blocks", ep.port)).body("{}").send().unwrap();
+        assert_eq!(bare.status(), 404);
+
+        let r2 = revision(send(reqwest::Method::DELETE, &ep.base_url(), r#"["a"]"#));
+        assert!(r2 > r1);
+        assert_eq!(tile("a"), 404, "a deleted geometry is not found, not ignored");
+        assert_eq!(tile("b"), 200);
+
+        // The store outlives the server: iOS takes a suspended app's socket,
+        // and the server started in its place must still have the geometry.
+        stop();
+        assert!(!answers(ep), "a stopped server does not answer");
+        let again = start(root, 1 << 20).unwrap();
+        assert_ne!(again.token, ep.token);
+        assert_eq!(http.get(format!(
+            "{}/tiles/16/37414/39214?url=file://s2_b04_predictor2.tif&geometry_provider=blocks&geometry_id=b",
+            again.base_url())).send().unwrap().status(), 200);
+
+        let r3 = revision(send(reqwest::Method::PUT, &again.base_url(), "{}"));
+        assert!(r3 > r2);
+        assert_eq!(http.get(format!(
+            "{}/tiles/16/37414/39214?url=file://s2_b04_predictor2.tif&geometry_provider=blocks&geometry_id=b",
+            again.base_url())).send().unwrap().status(), 404, "replaced with nothing");
     }
 }

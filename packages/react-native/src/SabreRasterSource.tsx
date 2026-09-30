@@ -2,6 +2,7 @@ import { type ReactNode, useEffect } from "react";
 import { Layer, RasterSource, type RasterLayerSpecification } from "@maplibre/maplibre-react-native";
 
 import { tileUrl, type Source } from "./api";
+import { useGeometryRevision } from "./geometries";
 import { useEndpoint } from "./hooks";
 import type { Style } from "./style";
 
@@ -34,8 +35,8 @@ export interface SabreRasterSourceProps {
  * streamed over https). Starts sabre's in-app server on first use.
  *
  * MapLibre builds a raster source once and ignores later changes to its
- * tiles, so a new style -- or a server that came back on a new port --
- * remounts the source. That redraws every visible tile; the layer's ids
+ * tiles, so a new style -- or a server that came back on a new port, or a
+ * change to geometry the style names -- remounts the source. That redraws every visible tile; the layer's ids
  * stay the same.
  */
 export function SabreRasterSource({
@@ -43,10 +44,14 @@ export function SabreRasterSource({
   paint, beforeId, afterId, layerIndex, children, onError,
 }: SabreRasterSourceProps) {
   const { endpoint, error } = useEndpoint();
+  const revision = useGeometryRevision(style?.geometry_provider);
   useEffect(() => { if (error) onError?.(error); }, [error, onError]);
   if (!endpoint) return null;
 
-  const url = tileUrl(endpoint, source, style, tileSize);
+  // The server ignores `geometry_rev`; it is here so the URL, and with it
+  // the source, changes when the geometry does.
+  const url = tileUrl(endpoint, source, style, tileSize)
+    + (style?.geometry_provider ? `&geometry_rev=${revision}` : "");
   return (
     <RasterSource key={url} id={id} tiles={[url]} tileSize={tileSize}
                   minzoom={minzoom} maxzoom={maxzoom} attribution={attribution}>

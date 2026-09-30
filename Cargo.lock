@@ -1421,6 +1421,7 @@ dependencies = [
  "getrandom 0.2.17",
  "jni",
  "reqwest",
+ "sabre-core",
  "sabre-server",
  "serde_json",
  "tokio",
