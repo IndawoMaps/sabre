@@ -176,16 +176,10 @@ pub async fn render_tile_rgba_timed(
     ));
 
     if let Some(mask) = &req.mask {
-        let mask_start = t.start();
-        let native_mask = match base.epsg_code {
-            Some(epsg) => match mask.reproject_from_wgs84(epsg) {
-                Ok(m)  => { log("[mask] reprojection ok"); std::sync::Arc::new(m) }
-                Err(e) => { log(&format!("[mask] reprojection error: {e}")); mask.clone() }
-            }
-            None => mask.clone(),
-        };
-        crate::mask::apply_mask(&mut resampled, req.tile_size, samples, &warp, &native_mask);
-        t.since(phase::MASK, mask_start);
+        // In the tile's own pixels, from WGS84: the raster's CRS never comes
+        // into it, so there is nothing to reproject.
+        t.time(phase::MASK, || crate::mask::apply_mask(
+            &mut resampled, req.tile_size, samples, req.z, req.x, req.y, mask));
     }
 
     let style_start = t.start();
@@ -232,8 +226,6 @@ pub async fn render_tile_rgba_timed(
 
     Ok(rgba)
 }
-
-fn log(msg: &str) { let _ = msg; }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
