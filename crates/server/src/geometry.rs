@@ -42,25 +42,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sabre_core::mask::{parse_wkt_mask, Mask};
+use sabre_core::mask::Mask;
 use sabre_core::twkb;
 use sha2::{Digest, Sha256};
 
 // ── Limits ────────────────────────────────────────────────────────────────────
 
-/// Ids long enough to be a payload rather than a name are refused outright.
-pub const MAX_ID_LEN: usize = 128;
-
-/// How many ids one request may name.
-///
-/// This bounds the cold-cache cost: a provider without a batch access endpoint
-/// is asked about each id, and every id is one geometry fetch. Warm, the whole
-/// set is a single cache entry however many ids it names.
-///
-/// The number has to clear a real farm with room to spare — the block sets
-/// this was built for run to 86 — so it is not a limit anyone meets by having
-/// an ordinary amount of land.
-pub const MAX_IDS: usize = 512;
+pub use sabre_core::geometry::{MAX_IDS, MAX_ID_LEN};
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_MAX_BYTES: usize = 1 << 20;
@@ -227,16 +215,6 @@ impl Registry {
     }
 }
 
-fn validate_provider_name(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 64 {
-        return Err(format!("provider name {id:?} must be 1–64 characters"));
-    }
-    if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-        return Err(format!("provider name {id:?} may only contain letters, digits, - and _"));
-    }
-    Ok(())
-}
-
 fn validate_scheme(url: &str) -> Result<(), String> {
     if url.starts_with("https://") || url.starts_with("http://") {
         Ok(())
@@ -270,53 +248,7 @@ fn parse_bytes(text: &str) -> Option<usize> {
 
 // ── Caller input ──────────────────────────────────────────────────────────────
 
-/// Accept only what is plainly a name.
-///
-/// The id is substituted into a URL the operator wrote, so anything that could
-/// end a path segment, start a query, or climb out of one has to be refused
-/// before it gets there — `..`, `/`, `?`, `#`, `%` and whitespace all do. What
-/// is left covers the shapes ids actually take: integers, UUIDs, slugs, and
-/// `ns:key` pairs.
-pub fn validate_id(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("geometry_id is empty".into());
-    }
-    if id.len() > MAX_ID_LEN {
-        return Err(format!("geometry_id is {} characters; the limit is {MAX_ID_LEN}", id.len()));
-    }
-    if let Some(bad) = id.chars().find(|c| {
-        !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
-    }) {
-        return Err(format!(
-            "geometry_id contains {bad:?}; only letters, digits, and - _ . : are allowed"));
-    }
-    if id.contains("..") {
-        return Err("geometry_id contains '..'".into());
-    }
-    Ok(())
-}
-
-/// Split and validate the `geometry_id` parameter, which may name several.
-pub fn parse_ids(raw: &str) -> Result<Vec<String>, String> {
-    let ids: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if ids.is_empty() {
-        return Err("geometry_id is empty".into());
-    }
-    if ids.len() > MAX_IDS {
-        return Err(format!(
-            "geometry_id names {} geometries; the limit is {MAX_IDS}. Clip to a smaller \
-             set, or have the provider expose the group under one id.", ids.len()));
-    }
-    for id in &ids {
-        validate_id(id)?;
-    }
-    let mut out: Vec<String> = ids.into_iter().map(str::to_string).collect();
-    // Sorted and deduplicated so the same set written two ways is one cache
-    // entry, and so a caller cannot multiply the work by repeating an id.
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
+pub use sabre_core::geometry::{parse_ids, validate_id, validate_provider_name};
 
 // ── Cache keys ────────────────────────────────────────────────────────────────
 
@@ -421,138 +353,7 @@ impl Error {
 
 // ── GeoJSON ───────────────────────────────────────────────────────────────────
 
-/// Turn whatever the provider returned into a [`Mask`].
-///
-/// TWKB is what a provider should serve, and it is checked for first — before
-/// any attempt to read the body as text, because a TWKB polygon at precision 6
-/// begins `0xC3 0x00`, which is not valid UTF-8 and would otherwise be
-/// reported as an encoding problem rather than a format it simply is.
-///
-/// GeoJSON and WKT are still accepted, since not every provider will emit TWKB
-/// and the branch costs one byte comparison. A FeatureCollection becomes one
-/// MultiPolygon rather than its first feature: asking for a farm and being
-/// silently clipped to one of its blocks is the kind of wrong answer that
-/// looks right.
-pub fn to_mask(body: &[u8], content_type: Option<&str>) -> Result<Mask, String> {
-    let declared_twkb = content_type
-        .is_some_and(|ct| ct.split(';').next().unwrap_or("").trim() == twkb::CONTENT_TYPE);
-    if declared_twkb || twkb::looks_like_twkb(body) {
-        return twkb::decode_mask(body);
-    }
-    parse_wkt_mask(&to_wkt(body)?)
-}
-
-/// Convert a textual provider response into the WKT `sabre-core` parses.
-pub fn to_wkt(body: &[u8]) -> Result<String, String> {
-    let text = std::str::from_utf8(body).map_err(|_| {
-        "response is neither TWKB nor valid UTF-8, so it is not a geometry this reader knows"
-            .to_string()
-    })?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err("response is empty".into());
-    }
-    // Already WKT: hand it to the same parser the `mask` parameter uses, so
-    // the two routes cannot disagree about what is valid.
-    let upper = trimmed.get(..13).unwrap_or(trimmed).to_ascii_uppercase();
-    if upper.starts_with("POLYGON") || upper.starts_with("MULTIPOLYGON") {
-        sabre_core::mask::parse_wkt_mask(trimmed)?;
-        return Ok(trimmed.to_string());
-    }
-
-    let json: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| format!("response is neither WKT nor JSON: {e}"))?;
-    let mut polygons = Vec::new();
-    collect(&json, &mut polygons, 0)?;
-    if polygons.is_empty() {
-        return Err("response contains no Polygon or MultiPolygon".into());
-    }
-    Ok(if polygons.len() == 1 {
-        format!("POLYGON{}", polygons.remove(0))
-    } else {
-        format!("MULTIPOLYGON({})", polygons.join(","))
-    })
-}
-
-/// Walk a GeoJSON document, appending each polygon as a parenthesised ring
-/// list. Depth-limited: a deeply nested document is a payload, not a geometry.
-fn collect(v: &serde_json::Value, out: &mut Vec<String>, depth: usize) -> Result<(), String> {
-    if depth > 8 {
-        return Err("GeoJSON is nested too deeply".into());
-    }
-    match v.get("type").and_then(|t| t.as_str()) {
-        Some("FeatureCollection") => {
-            let features = v.get("features").and_then(|f| f.as_array())
-                .ok_or("FeatureCollection has no features array")?;
-            for f in features {
-                collect(f, out, depth + 1)?;
-            }
-            Ok(())
-        }
-        Some("Feature") => {
-            let g = v.get("geometry").ok_or("Feature has no geometry")?;
-            if g.is_null() {
-                return Ok(()); // a null-geometry feature is legal and contributes nothing
-            }
-            collect(g, out, depth + 1)
-        }
-        Some("GeometryCollection") => {
-            let gs = v.get("geometries").and_then(|g| g.as_array())
-                .ok_or("GeometryCollection has no geometries array")?;
-            for g in gs {
-                collect(g, out, depth + 1)?;
-            }
-            Ok(())
-        }
-        Some("Polygon") => {
-            out.push(rings(v.get("coordinates").ok_or("Polygon has no coordinates")?)?);
-            Ok(())
-        }
-        Some("MultiPolygon") => {
-            let polys = v.get("coordinates").and_then(|c| c.as_array())
-                .ok_or("MultiPolygon has no coordinates")?;
-            for p in polys {
-                out.push(rings(p)?);
-            }
-            Ok(())
-        }
-        Some(other) => Err(format!("{other} cannot be used as a clip geometry")),
-        None => Err("GeoJSON object has no type".into()),
-    }
-}
-
-/// `[[[x,y],…],…]` -> `((x y,…),…)`
-fn rings(coords: &serde_json::Value) -> Result<String, String> {
-    let rings = coords.as_array().ok_or("coordinates is not an array")?;
-    if rings.is_empty() {
-        return Err("polygon has no rings".into());
-    }
-    let mut parts = Vec::with_capacity(rings.len());
-    for ring in rings {
-        let points = ring.as_array().ok_or("ring is not an array")?;
-        if points.len() < 4 {
-            return Err(format!("ring has {} positions; a closed ring needs at least 4", points.len()));
-        }
-        let mut wkt = String::with_capacity(points.len() * 24);
-        for (i, point) in points.iter().enumerate() {
-            let p = point.as_array().ok_or("position is not an array")?;
-            let (x, y) = (
-                p.first().and_then(serde_json::Value::as_f64).ok_or("position has no x")?,
-                p.get(1).and_then(serde_json::Value::as_f64).ok_or("position has no y")?,
-            );
-            if !x.is_finite() || !y.is_finite() {
-                return Err("position is not a finite coordinate".into());
-            }
-            if i > 0 {
-                wkt.push(',');
-            }
-            use std::fmt::Write;
-            let _ = write!(wkt, "{x} {y}");
-        }
-        parts.push(format!("({wkt})"));
-    }
-    Ok(format!("({})", parts.join(",")))
-}
+pub use sabre_core::geometry::{to_mask, to_wkt};
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 
@@ -715,6 +516,7 @@ fn allows(body: &[u8], asked: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sabre_core::mask::parse_wkt_mask;
 
     fn provider(line: &str) -> Provider {
         Registry::parse(line).unwrap().get(line.split('=').next().unwrap()).unwrap().clone()

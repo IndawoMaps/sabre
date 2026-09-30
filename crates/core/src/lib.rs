@@ -3,6 +3,7 @@ pub mod query;
 pub mod reader;
 pub mod colormaps;
 pub mod geo;
+pub mod geometry;
 pub mod mask;
 pub mod params;
 pub mod render;
