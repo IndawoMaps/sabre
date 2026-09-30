@@ -182,15 +182,8 @@ pub fn parse_wkt_mask(wkt: &str) -> Result<Mask, String> {
 /// 65,536 point-in-polygon tests against 86 polygons, plus the reprojection,
 /// on every tile -- about 3 ms each, and half again the cost of the rest of
 /// the render. The tile's own pixel grid is simpler to work in. Mercator from
-/// lon/lat is a closed form, so the vertices go straight into pixel space,
-/// and then each row of pixels is a scanline: the edges it crosses, sorted,
-/// bound the spans inside, and the spans are filled rather than tested.
-///
-/// A pixel is inside exactly when `contains` would say so of its centre in
-/// the same space: the same half-open rule picks which edges a row crosses,
-/// and a centre on a span's left end is in and on its right end is out, which
-/// is what counting crossings strictly to the right of it gives. Polygons
-/// union -- each is filled even-odd over its own rings, as `contains` does.
+/// lon/lat is a closed form, so the vertices go straight into pixel space and
+/// [`fill_grid`] fills the rows between their edges.
 ///
 /// Edges are straight in Mercator here where they were straight in the
 /// raster's CRS before. Across a field boundary's edges the two differ by far
@@ -207,20 +200,38 @@ pub fn apply_mask(resampled: &mut [f32], tile_size: u32, samples: usize, z: u32,
 
 /// Which pixels of the `n`×`n` tile `z/x/y` have their centre inside `mask`.
 fn coverage(n: usize, z: u32, x: u32, y: u32, mask: &Mask) -> Vec<bool> {
-    let mut inside = vec![false; n * n];
     let to_px = tile_pixels(n, z, x, y);
     let tile = crate::geo::tile_to_bbox(z, x, y);
+    let near = mask.polygons.iter().zip(&mask.bounds)
+        .filter(|(_, &(w, s, e, nth))| !(e < tile.west || w > tile.east || nth < tile.south || s > tile.north))
+        .map(|(rings, _)| rings.iter().map(|r| r.iter().copied().map(&to_px).collect()).collect());
+    fill_grid(n, n, near)
+}
 
+/// Which cells of a `width`×`height` grid have their centre inside any of
+/// `polygons`, whose rings are already in the grid's coordinates: (0, 0) is
+/// the top-left corner of the first cell, and cells are one unit square.
+///
+/// Scanline: each row's centre line crosses some edges; sorted, consecutive
+/// pairs of crossings bound the spans inside, and the spans are filled rather
+/// than every cell tested. A cell is inside exactly when [`Mask::contains`]
+/// would say so of its centre in the same coordinates: the same half-open
+/// rule picks which edges a row crosses, and a centre on a span's left end is
+/// in and on its right end is out, which is what counting crossings strictly
+/// to the right of it gives. Polygons union -- each is filled even-odd over
+/// its own rings, as `contains` does.
+pub(crate) fn fill_grid(
+    width: usize,
+    height: usize,
+    polygons: impl IntoIterator<Item = Vec<Vec<(f64, f64)>>>,
+) -> Vec<bool> {
+    let mut inside = vec![false; width * height];
     let mut edges: Vec<Edge> = Vec::new();
     let mut active: Vec<Edge> = Vec::new();
     let mut xs: Vec<f64> = Vec::new();
-    for (rings, &(w, s, e, nth)) in mask.polygons.iter().zip(&mask.bounds) {
-        if e < tile.west || w > tile.east || nth < tile.south || s > tile.north {
-            continue;
-        }
+    for rings in polygons {
         edges.clear();
-        for ring in rings {
-            let pts: Vec<(f64, f64)> = ring.iter().copied().map(&to_px).collect();
+        for pts in &rings {
             for i in 0..pts.len() {
                 // The closing edge too, as `ring_crossings` walks it: a ring
                 // written closed adds a zero-length edge, which crosses nothing.
@@ -236,7 +247,7 @@ fn coverage(n: usize, z: u32, x: u32, y: u32, mask: &Mask) -> Vec<bool> {
         let first = edges.first().map_or(0.0, |e| (e.top - 0.5).ceil().max(0.0)) as usize;
         let mut next = 0;
         active.clear();
-        for row in first..n {
+        for row in first..height {
             let yc = row as f64 + 0.5;
             while next < edges.len() && edges[next].top <= yc {
                 active.push(edges[next]);
@@ -254,11 +265,11 @@ fn coverage(n: usize, z: u32, x: u32, y: u32, mask: &Mask) -> Vec<bool> {
             // exactly on an edge is decided the same way.
             xs.extend(active.iter().map(|e| e.a.0 + (yc - e.a.1) / (e.b.1 - e.a.1) * (e.b.0 - e.a.0)));
             xs.sort_by(f64::total_cmp);
-            let line = &mut inside[row * n..(row + 1) * n];
+            let line = &mut inside[row * width..(row + 1) * width];
             for span in xs.chunks_exact(2) {
                 // Centres c = col + 0.5 with span[0] <= c < span[1].
-                let from = (span[0] - 0.5).ceil().clamp(0.0, n as f64) as usize;
-                let to = (span[1] - 0.5).ceil().clamp(0.0, n as f64) as usize;
+                let from = (span[0] - 0.5).ceil().clamp(0.0, width as f64) as usize;
+                let to = (span[1] - 0.5).ceil().clamp(0.0, width as f64) as usize;
                 if from < to {
                     line[from..to].fill(true);
                 }
