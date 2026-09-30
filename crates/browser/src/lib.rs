@@ -16,6 +16,7 @@ use sabre_core::cog::{fetch_meta, CogMeta, RangeReader};
 use std::sync::Arc;
 
 use sabre_core::geo;
+use sabre_core::geometry::{parse_ids, to_mask, GeometryStore};
 use sabre_core::mask::{parse_wkt_mask, Mask};
 use sabre_core::params::StyleParams;
 use sabre_core::reader::{range_body, CachingReader, HeaderCache, InFlight, Page, PageCache, PagedReader};
@@ -193,6 +194,26 @@ struct TileOptions {
     /// WKT. Parsed once per distinct value, not per tile -- see [`Cog::mask`].
     #[serde(default)]
     mask: Option<String>,
+    /// Geometry put in with [`set_geometries`], named the way the server's
+    /// providers are. The id may also be a number or an array of either,
+    /// since that is what JavaScript tends to have to hand.
+    #[serde(default)]
+    geometry_provider: Option<String>,
+    #[serde(default)]
+    geometry_id: Option<serde_json::Value>,
+}
+
+/// `geometry_id` as the comma-separated list the server takes.
+fn id_list(v: &serde_json::Value) -> Result<String, String> {
+    let one = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => Ok(s.clone()),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(format!("geometry_id cannot be {other}")),
+    };
+    match v {
+        serde_json::Value::Array(items) => Ok(items.iter().map(one).collect::<Result<Vec<_>, _>>()?.join(",")),
+        other => one(other),
+    }
 }
 
 fn parse_options(json: &str) -> Result<TileOptions, JsValue> {
@@ -200,6 +221,65 @@ fn parse_options(json: &str) -> Result<TileOptions, JsValue> {
         return Ok(TileOptions::default());
     }
     serde_json::from_str(json).map_err(|e| JsValue::from_str(&format!("bad tile options: {e}")))
+}
+
+// ── Geometry ─────────────────────────────────────────────────────────────────
+//
+// One store for the worker, not one per Cog: a block clips every raster drawn
+// over it, and is put in once for all of them. The worker is single-threaded,
+// so a thread-local is the whole of the synchronisation.
+
+thread_local! {
+    static GEOMETRIES: RefCell<GeometryStore> = RefCell::new(GeometryStore::new());
+}
+
+/// Add or overwrite geometry under `provider`, or with `replace`, make it the
+/// provider's entire contents. Returns the provider's new revision.
+///
+/// `geometries[i]` is the shape for `ids[i]`: TWKB bytes (a `Uint8Array` or
+/// `ArrayBuffer`), or WKT or GeoJSON text, in WGS84. Everything is decoded
+/// before anything changes, so one bad entry leaves the store as it was.
+#[wasm_bindgen(js_name = setGeometries)]
+pub fn set_geometries(provider: &str, ids: Vec<String>, geometries: Vec<JsValue>, replace: bool)
+    -> Result<f64, JsValue>
+{
+    if ids.len() != geometries.len() {
+        return Err(JsValue::from_str(&format!(
+            "{} ids for {} geometries", ids.len(), geometries.len())));
+    }
+    let entries = ids.into_iter().zip(&geometries)
+        .map(|(id, g)| decode_geometry(g).map(|m| (id.clone(), m))
+            .map_err(|e| format!("geometry {id}: {e}")))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| JsValue::from_str(&e))?;
+    GEOMETRIES.with_borrow_mut(|store| if replace {
+        store.replace(provider, entries)
+    } else {
+        store.set(provider, entries)
+    })
+    .map(|rev| rev as f64)
+    .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Remove `ids` from `provider`. Returns its revision, changed only if
+/// something was actually removed.
+#[wasm_bindgen(js_name = deleteGeometries)]
+pub fn delete_geometries(provider: &str, ids: Vec<String>) -> f64 {
+    GEOMETRIES.with_borrow_mut(|store| store.delete(provider, &ids)) as f64
+}
+
+fn decode_geometry(g: &JsValue) -> Result<Mask, String> {
+    if let Some(text) = g.as_string() {
+        return to_mask(text.as_bytes(), None);
+    }
+    let bytes = if let Some(a) = g.dyn_ref::<js_sys::Uint8Array>() {
+        a.to_vec()
+    } else if g.is_instance_of::<js_sys::ArrayBuffer>() {
+        js_sys::Uint8Array::new(g).to_vec()
+    } else {
+        return Err("expected TWKB bytes or WKT or GeoJSON text".into());
+    };
+    to_mask(&bytes, None)
 }
 
 // ── The thing JavaScript holds ───────────────────────────────────────────────
@@ -299,6 +379,26 @@ impl Cog {
         Ok(m)
     }
 
+    /// The clip a tile asked for: a registered geometry by name, or a WKT
+    /// `mask`. Both at once is refused, as the server refuses it -- they say
+    /// different things, and honouring one clips to a shape nobody asked for.
+    fn clip_of(&self, opts: &TileOptions, t: &Timings) -> Result<Option<Arc<Mask>>, String> {
+        let (provider, ids) = match (opts.geometry_provider.as_deref(), opts.geometry_id.as_ref()) {
+            (None, None) => return self.mask_of(opts.mask.as_deref(), t),
+            (Some(p), Some(i)) => (p, i),
+            (Some(_), None) => return Err("geometry_provider needs a geometry_id".into()),
+            (None, Some(_)) => return Err("geometry_id needs a geometry_provider".into()),
+        };
+        if opts.mask.as_deref().is_some_and(|m| !m.trim().is_empty()) {
+            return Err("mask and geometry_provider both name a clip geometry; send one or the other".into());
+        }
+        let ids = parse_ids(&id_list(ids)?)?;
+        t.time(sabre_core::timing::phase::GEOMETRY, || {
+            GEOMETRIES.with_borrow_mut(|store| store.resolve(provider, &ids))
+        })
+        .map(Some)
+    }
+
     fn mask_of(&self, wkt: Option<&str>, t: &Timings) -> Result<Option<Arc<Mask>>, String> {
         let Some(wkt) = wkt.filter(|w| !w.trim().is_empty()) else {
             return Ok(None);
@@ -384,7 +484,8 @@ impl Cog {
     ///
     /// `options` is JSON with the HTTP API's names: `mode`, `colormap`, `min`,
     /// `max`, `nodata`, `stops`, `azimuth`, … plus `tile_size`,
-    /// `interpolation` and `mask` (WKT). The result is `{data, ms, requests,
+    /// `interpolation`, and a clip: `mask` (WKT), or `geometry_provider` and
+    /// `geometry_id` naming geometry put in with [`set_geometries`]. The result is `{data, ms, requests,
     /// timing}`, where `data` owns its buffer and so can be transferred.
     pub async fn pixels(&self, z: u32, x: u32, y: u32, options: String) -> Result<JsValue, JsValue> {
         self.render(z, x, y, &options, false).await
@@ -403,9 +504,11 @@ impl Cog {
 
         let opts = parse_options(options)?;
         let style = opts.style.to_style().map_err(err)?;
+        // Before the first await: the tile keeps the geometry it started
+        // with, even if the app replaces or deletes it while this one reads.
+        let mask = self.clip_of(&opts, &t).map_err(err)?;
         let reader = self.reader();
         let meta = self.meta_of(reader.as_ref(), &t).await.map_err(err)?;
-        let mask = self.mask_of(opts.mask.as_deref(), &t).map_err(err)?;
 
         let req = TileRequest {
             z,

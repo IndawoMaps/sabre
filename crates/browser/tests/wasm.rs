@@ -213,6 +213,110 @@ async fn a_mask_clears_what_is_outside_it() {
     assert_eq!(pixels(&cog, &options).await.unwrap(), masked);
 }
 
+/// A square at the centre of [`TILE`], an eighth of its width, as WKT and
+/// as its corners, for building the same shape in other encodings.
+fn centre_square(scale: f64) -> (String, [(f64, f64); 5]) {
+    let (z, x, y) = TILE;
+    let b = sabre_core::geo::tile_to_bbox(z, x, y);
+    let (cx, cy) = ((b.west + b.east) / 2.0, (b.south + b.north) / 2.0);
+    let (hw, hh) = ((b.east - b.west) / 16.0 * scale, (b.north - b.south) / 16.0 * scale);
+    let (w, e, s, n) = (cx - hw, cx + hw, cy - hh, cy + hh);
+    let ring = [(w, s), (e, s), (e, n), (w, n), (w, s)];
+    let wkt = format!("POLYGON(({}))",
+        ring.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(","));
+    (wkt, ring)
+}
+
+fn set(provider: &str, entries: &[(&str, JsValue)]) -> Result<f64, String> {
+    sabre_browser::set_geometries(
+        provider,
+        entries.iter().map(|(id, _)| id.to_string()).collect(),
+        entries.iter().map(|(_, g)| g.clone()).collect(),
+        false,
+    ).map_err(|e| e.as_string().unwrap_or_default())
+}
+
+#[wasm_bindgen_test]
+async fn a_named_geometry_draws_what_the_same_mask_draws() {
+    let cog = fixture_cog().await;
+    let (wkt, ring) = centre_square(1.0);
+    let by_mask = pixels(&cog, &format!(r#"{{"max": 600, "mask": "{wkt}"}}"#)).await.unwrap();
+
+    let geojson = format!(r#"{{"type": "Polygon", "coordinates": [[{}]]}}"#,
+        ring.iter().map(|(x, y)| format!("[{x},{y}]")).collect::<Vec<_>>().join(","));
+    let twkb = twkb::encode_mask(&parse_wkt_mask(&wkt).unwrap(), twkb::DEFAULT_PRECISION).unwrap();
+    set("named", &[
+        ("wkt", JsValue::from_str(&wkt)),
+        ("geojson", JsValue::from_str(&geojson)),
+        ("twkb", js_sys::Uint8Array::from(&twkb[..]).into()),
+        ("twkb-buffer", js_sys::Uint8Array::from(&twkb[..]).buffer().into()),
+    ]).unwrap();
+
+    for id in ["wkt", "geojson", "twkb", "twkb-buffer"] {
+        let options = format!(r#"{{"max": 600, "geometry_provider": "named", "geometry_id": "{id}"}}"#);
+        assert_eq!(pixels(&cog, &options).await.unwrap(), by_mask, "{id}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn several_ids_clip_to_their_union_however_they_are_written() {
+    let cog = fixture_cog().await;
+    let (small, _) = centre_square(0.5);
+    let (large, _) = centre_square(1.0);
+    set("union", &[("1", JsValue::from_str(&small)), ("2", JsValue::from_str(&large))]).unwrap();
+
+    let only_large = pixels(&cog, r#"{"max": 600, "geometry_provider": "union", "geometry_id": 2}"#)
+        .await.unwrap();
+    for ids in [r#""1,2""#, r#""2, 1""#, "[1, 2]", r#"["2", 1]"#] {
+        let options = format!(r#"{{"max": 600, "geometry_provider": "union", "geometry_id": {ids}}}"#);
+        assert_eq!(pixels(&cog, &options).await.unwrap(), only_large, "{ids}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn geometry_changes_reach_the_next_tile() {
+    let cog = fixture_cog().await;
+    let (small, _) = centre_square(0.5);
+    let (large, _) = centre_square(1.0);
+    let options = r#"{"max": 600, "geometry_provider": "churn", "geometry_id": "a"}"#;
+
+    let r1 = set("churn", &[("a", JsValue::from_str(&small))]).unwrap();
+    let before = opaque(&pixels(&cog, options).await.unwrap());
+    let r2 = set("churn", &[("a", JsValue::from_str(&large))]).unwrap();
+    let after = opaque(&pixels(&cog, options).await.unwrap());
+    assert!(r2 > r1);
+    assert!(after > before, "{after} opaque after growing, {before} before");
+
+    let r3 = sabre_browser::delete_geometries("churn", vec!["a".into()]);
+    assert!(r3 > r2);
+    let e = pixels(&cog, options).await.unwrap_err();
+    assert!(e.contains("no geometry"), "a deleted geometry is an error, not no clip: {e}");
+}
+
+#[wasm_bindgen_test]
+async fn a_bad_geometry_reference_says_what_is_wrong() {
+    let cog = fixture_cog().await;
+    let (wkt, _) = centre_square(1.0);
+    set("refs", &[("a", JsValue::from_str(&wkt))]).unwrap();
+
+    for (options, expect) in [
+        (r#"{"geometry_provider": "refs"}"#.to_string(), "needs a geometry_id"),
+        (r#"{"geometry_id": "a"}"#.to_string(), "needs a geometry_provider"),
+        (r#"{"geometry_provider": "refs", "geometry_id": "b"}"#.to_string(), "has no geometry b"),
+        (r#"{"geometry_provider": "nobody", "geometry_id": "a"}"#.to_string(), "no geometry is registered"),
+        (r#"{"geometry_provider": "refs", "geometry_id": "a/b"}"#.to_string(), "contains '/'"),
+        (format!(r#"{{"geometry_provider": "refs", "geometry_id": "a", "mask": "{wkt}"}}"#), "send one or the other"),
+    ] {
+        let e = pixels(&cog, &options).await.unwrap_err();
+        assert!(e.contains(expect), "{options}: {e}");
+    }
+
+    let e = set("refs", &[("b", JsValue::from_str("POLYGON((this is not wkt))"))]).unwrap_err();
+    assert!(e.starts_with("geometry b:"), "{e}");
+    let e = set("refs", &[("c", JsValue::from_f64(1.0))]).unwrap_err();
+    assert!(e.contains("expected TWKB"), "{e}");
+}
+
 #[wasm_bindgen_test]
 async fn info_says_where_the_raster_is_and_how_fine() {
     let cog = fixture_cog().await;
