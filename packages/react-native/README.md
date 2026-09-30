@@ -121,7 +121,12 @@ raster's size, data type, nodata, EPSG code, WGS84 `extent` and `center`, and
 
 **`info(source)`** is the same as a promise. **`queryRaster(source, { lng, lat })`**
 reads the value at a point, and **`queryRaster(source, { polygon })`** gives
-min, max, mean and standard deviation inside a WKT polygon.
+statistics inside a WKT polygon: min, max, mean and standard deviation, and the
+polygon's area in m² split between pixels with data and nodata. Pixels the
+boundary cuts count for the part of them inside, as in exactextract. With
+`{ classes: true }` it adds each distinct value's share and area, for land
+cover and other categorical rasters. See the server's `/query` documentation
+for every field.
 
 **`listRasters()`** lists the GeoTIFFs directly inside the file root.
 

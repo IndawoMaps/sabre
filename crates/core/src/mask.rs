@@ -378,6 +378,248 @@ fn ring_crossings(ring: &[(f64, f64)], lon: f64, lat: f64) -> usize {
     crossings
 }
 
+/// Polygons as rings of points: each polygon's first ring is its exterior,
+/// the rest its holes.
+pub(crate) type Polygons = Vec<Vec<Vec<(f64, f64)>>>;
+
+/// Coverage below this is rounding left over from edges that cancel, not
+/// area: a cell the polygon only touches along an edge accumulates +d and
+/// -d from the two sides and can end a hair off zero.
+pub(crate) const MIN_COVERAGE: f64 = 1e-9;
+
+/// The fraction of each cell of a `width`×`height` grid that lies inside
+/// `polygons`, handed to `run` as runs of covered cells: `run(row, col,
+/// coverage)` for the cells from `col` on, top to bottom and left to right.
+/// Cells nothing covers are never handed over. Coordinates are the grid's
+/// own, as in [`fill_grid`].
+///
+/// Exact, not sampled: each edge adds the signed area it sweeps to the cells
+/// it crosses, and a running sum along the row turns those into coverage --
+/// the accumulation font rasterisers use for anti-aliasing, which is the same
+/// question with a different use for the answer. Only the edges crossing a
+/// row are visited for it, and only a row's worth of memory is held.
+///
+/// Coverage only changes in cells an edge passes through; between them it
+/// is constant -- 0 outside, 1 inside. So the running sum visits just those
+/// cells, and the stretches between are filled or skipped whole. The work
+/// is the covered cells plus the boundary, not the grid.
+///
+/// Rings are oriented here, exteriors one way and holes the other, so the
+/// winding of the input does not matter: GeoJSON asks for one orientation,
+/// WKT none, and data follows neither reliably. Polygons that overlap add up
+/// and are clamped at 1, which is right for the valid geometry a
+/// MultiPolygon is supposed to be.
+pub(crate) fn coverage_rows(
+    width: usize,
+    height: usize,
+    polygons: &[Vec<Vec<(f64, f64)>>],
+    mut run: impl FnMut(usize, usize, &[f64]),
+) {
+    let mut segs: Vec<Segment> = Vec::new();
+    for rings in polygons {
+        for (k, ring) in rings.iter().enumerate() {
+            // With y growing downward, a ring whose shoelace area is negative
+            // accumulates positive coverage. Exteriors are made to, holes not.
+            let flip = (shoelace(ring) < 0.0) != (k == 0);
+            for i in 0..ring.len() {
+                let (mut p, mut q) = (ring[i], ring[(i + 1) % ring.len()]);
+                if flip {
+                    std::mem::swap(&mut p, &mut q);
+                }
+                if p.1 == q.1 || !(p.0.is_finite() && p.1.is_finite() && q.0.is_finite() && q.1.is_finite()) {
+                    continue;
+                }
+                segs.push(if p.1 < q.1 {
+                    Segment { top: p, bottom: q, dir: 1.0 }
+                } else {
+                    Segment { top: q, bottom: p, dir: -1.0 }
+                });
+            }
+        }
+    }
+    segs.sort_by(|a, b| a.top.1.total_cmp(&b.top.1));
+
+    // Two spare cells: an edge on the grid's right-hand line lands in `width`,
+    // and a spread can reach one past its last cell.
+    let mut acc = vec![0.0; width + 2];
+    let mut cover = vec![0.0; width];
+    let mut touched: Vec<(usize, usize)> = Vec::new();
+    let mut active: Vec<Segment> = Vec::new();
+    let first = segs.first().map_or(0.0, |s| s.top.1.floor().max(0.0)) as usize;
+    let mut next = 0;
+    for r in first..height {
+        let (y0, y1) = (r as f64, r as f64 + 1.0);
+        while next < segs.len() && segs[next].top.1 < y1 {
+            active.push(segs[next]);
+            next += 1;
+        }
+        active.retain(|s| s.bottom.1 > y0);
+        if active.is_empty() {
+            if next == segs.len() {
+                break;
+            }
+            continue;
+        }
+
+        touched.clear();
+        for s in &active {
+            let (ya, yb) = (s.top.1.max(y0), s.bottom.1.min(y1));
+            if yb > ya {
+                accumulate(&mut acc, &mut touched, width, s.x_at(ya), s.x_at(yb), (yb - ya) * s.dir);
+            }
+        }
+        touched.sort_unstable_by_key(|t| t.0);
+
+        // Walk the touched cells, merged into clusters, carrying the running
+        // sum across the constant stretches between them.
+        let clamp = |c: f64| if c < MIN_COVERAGE { 0.0 } else { c.min(1.0) };
+        let (mut c, mut col, mut start) = (0.0, 0usize, None::<usize>);
+        let mut emit = |start: &mut Option<usize>, end: usize, cover: &[f64]| {
+            if let Some(s) = start.take() {
+                run(r, s, &cover[s..end]);
+            }
+        };
+        let mut i = 0;
+        while i < touched.len() {
+            let (lo, mut hi) = touched[i];
+            i += 1;
+            while i < touched.len() && touched[i].0 <= hi + 1 {
+                hi = hi.max(touched[i].1);
+                i += 1;
+            }
+            let lo = lo.min(width);
+            // The stretch before the cluster, at the coverage carried in.
+            if lo > col {
+                if clamp(c) > 0.0 {
+                    cover[col..lo].fill(clamp(c));
+                    start.get_or_insert(col);
+                } else {
+                    emit(&mut start, col, &cover);
+                }
+            }
+            for j in lo..=hi.min(width + 1) {
+                c += acc[j];
+                acc[j] = 0.0;
+                if j < width {
+                    cover[j] = clamp(c);
+                    if cover[j] > 0.0 {
+                        start.get_or_insert(j);
+                    } else {
+                        emit(&mut start, j, &cover);
+                    }
+                }
+            }
+            col = (hi + 1).min(width);
+        }
+        // Past the last edge every contribution has cancelled out, so
+        // nothing to the right is covered; whatever run is open ends here.
+        emit(&mut start, col, &cover);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Segment {
+    top: (f64, f64),
+    bottom: (f64, f64),
+    /// +1 for an edge running down the grid, -1 up.
+    dir: f64,
+}
+
+impl Segment {
+    fn x_at(&self, y: f64) -> f64 {
+        self.top.0 + (y - self.top.1) * (self.bottom.0 - self.top.0) / (self.bottom.1 - self.top.1)
+    }
+}
+
+/// Twice the signed area of a ring, by the shoelace formula.
+fn shoelace(ring: &[(f64, f64)]) -> f64 {
+    (0..ring.len()).map(|i| {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        a.0 * b.1 - b.0 * a.1
+    }).sum()
+}
+
+/// Add one row's piece of an edge, from `xa` at its top to `xb` at its
+/// bottom, `d` being its height in the row with the edge's sign.
+///
+/// Whatever lies left of the grid still shades every cell to its right, so
+/// it is folded onto the grid's left edge; whatever lies right of it shades
+/// nothing inside and goes to the spare cell.
+fn accumulate(acc: &mut [f64], touched: &mut Vec<(usize, usize)>, width: usize, xa: f64, xb: f64, d: f64) {
+    let w = width as f64;
+    let mut cuts = [0.0, 1.0, 1.0, 1.0];
+    let mut n = 1;
+    if xa != xb {
+        for edge in [0.0, w] {
+            let t = (edge - xa) / (xb - xa);
+            if t > 0.0 && t < 1.0 {
+                cuts[n] = t;
+                n += 1;
+            }
+        }
+    }
+    cuts[n] = 1.0;
+    cuts[..=n].sort_by(f64::total_cmp);
+    for piece in cuts[..=n].windows(2) {
+        let (t0, t1) = (piece[0], piece[1]);
+        if t1 <= t0 {
+            continue;
+        }
+        let (x0, x1) = (xa + (xb - xa) * t0, xa + (xb - xa) * t1);
+        let dd = d * (t1 - t0);
+        let mid = 0.5 * (x0 + x1);
+        if mid <= 0.0 {
+            acc[0] += dd;
+            touched.push((0, 0));
+        } else if mid >= w {
+            acc[width] += dd;
+            touched.push((width, width));
+        } else {
+            touched.push(spread(acc, x0.clamp(0.0, w), x1.clamp(0.0, w), dd));
+        }
+    }
+}
+
+/// Distribute the area a straight piece of edge sweeps within one row among
+/// the cells it crosses, as differences for the running sum to integrate:
+/// the cell it enters gets the triangle beyond it, the cells it crosses whole
+/// the slices in between, and every cell after it the full height `d`.
+/// Returns the first and last cells written.
+fn spread(acc: &mut [f64], xs: f64, xe: f64, d: f64) -> (usize, usize) {
+    let (x0, x1) = if xs < xe { (xs, xe) } else { (xe, xs) };
+    let x0floor = x0.floor();
+    let x0i = x0floor as usize;
+    let x1ceil = x1.ceil();
+    let x1i = x1ceil as usize;
+    if x1i <= x0i + 1 {
+        // Within one cell: it is covered to the right of the piece's middle.
+        let xmf = 0.5 * (xs + xe) - x0floor;
+        acc[x0i] += d - d * xmf;
+        acc[x0i + 1] += d * xmf;
+        (x0i, x0i + 1)
+    } else {
+        let s = 1.0 / (x1 - x0);
+        let x0f = x0 - x0floor;
+        let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f);
+        let x1f = x1 - x1ceil + 1.0;
+        let am = 0.5 * s * x1f * x1f;
+        acc[x0i] += d * a0;
+        if x1i == x0i + 2 {
+            acc[x0i + 1] += d * (1.0 - a0 - am);
+        } else {
+            let a1 = s * (1.5 - x0f);
+            acc[x0i + 1] += d * (a1 - a0);
+            for a in &mut acc[x0i + 2..x1i - 1] {
+                *a += d * s;
+            }
+            let a2 = a1 + (x1i - x0i - 3) as f64 * s;
+            acc[x1i - 1] += d * (1.0 - a2 - am);
+        }
+        acc[x1i] += d * am;
+        (x0i, x1i)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +728,111 @@ mod tests {
         for (i, px) in data.chunks_exact(3).enumerate() {
             let left = i % N < 128;
             assert!(px.iter().all(|v| v.is_nan() != left), "pixel {i}: {px:?}");
+        }
+    }
+
+    // ── Exact coverage ───────────────────────────────────────────────────
+
+    fn coverage_grid(w: usize, h: usize, polygons: &[Vec<Vec<(f64, f64)>>]) -> Vec<f64> {
+        let mut out = vec![0.0; w * h];
+        coverage_rows(w, h, polygons, |r, col, run| {
+            assert!(run.iter().all(|&c| c > 0.0), "runs hold only covered cells");
+            out[r * w + col..r * w + col + run.len()].copy_from_slice(run);
+        });
+        out
+    }
+
+    /// Coverage by brute force: `k`×`k` samples per cell.
+    fn sampled(w: usize, h: usize, polygons: &[Vec<Vec<(f64, f64)>>], k: usize) -> Vec<f64> {
+        let m = Mask::from_rings(polygons.to_vec());
+        (0..w * h).map(|i| {
+            let (cx, cy) = ((i % w) as f64, (i / w) as f64);
+            let mut n = 0;
+            for sy in 0..k {
+                for sx in 0..k {
+                    if m.contains(cx + (sx as f64 + 0.5) / k as f64, cy + (sy as f64 + 0.5) / k as f64) {
+                        n += 1;
+                    }
+                }
+            }
+            n as f64 / (k * k) as f64
+        }).collect()
+    }
+
+    fn area(polygons: &[Vec<Vec<(f64, f64)>>]) -> f64 {
+        polygons.iter().map(|rings| rings.iter().enumerate()
+            .map(|(k, r)| if k == 0 { shoelace(r).abs() } else { -shoelace(r).abs() } / 2.0)
+            .sum::<f64>()).sum()
+    }
+
+    #[test]
+    fn a_rectangle_covers_the_fractions_it_should() {
+        // From (0.25, 0.5) to (2.75, 1.5): a quarter off the first and last
+        // columns, half off each of the two rows.
+        let rect = vec![vec![vec![(0.25, 0.5), (2.75, 0.5), (2.75, 1.5), (0.25, 1.5)]]];
+        let got = coverage_grid(3, 2, &rect);
+        let want = [0.375, 0.5, 0.375, 0.375, 0.5, 0.375];
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-12, "{got:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_adds_up_to_the_area_whatever_the_winding() {
+        let shapes: Vec<Vec<Vec<(f64, f64)>>> = vec![
+            vec![star(20.0, 20.0, 15.0, 7, true)],
+            vec![star(20.0, 20.0, 15.0, 9, true), star(20.0, 20.0, 6.0, 4, false)],
+        ];
+        for shape in shapes {
+            let reversed: Vec<Vec<(f64, f64)>> = shape.iter()
+                .map(|r| r.iter().rev().copied().collect()).collect();
+            // Holes wound the same way as the exterior, as careless data has.
+            let same: Vec<Vec<(f64, f64)>> = shape.iter().enumerate()
+                .map(|(k, r)| if k == 0 { r.clone() } else { r.iter().rev().copied().collect() }).collect();
+            for variant in [shape.clone(), reversed, same] {
+                let total: f64 = coverage_grid(40, 40, std::slice::from_ref(&variant)).iter().sum();
+                let want = area(&[variant]);
+                assert!((total - want).abs() < 1e-9 * want, "{total} against {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn coverage_matches_sampling_cell_by_cell() {
+        let shape = vec![
+            vec![star(12.3, 11.7, 10.0, 7, true), star(12.0, 12.0, 3.5, 5, true)],
+            vec![star(3.0, 3.0, 2.2, 3, false)],
+        ];
+        let (got, want) = (coverage_grid(24, 24, &shape), sampled(24, 24, &shape, 64));
+        let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        // Sampling at 64×64 is itself only good to a percent or two at an edge.
+        assert!(worst < 0.03, "worst cell differs by {worst}");
+    }
+
+    #[test]
+    fn what_lies_off_the_grid_is_cut_away() {
+        // A square overhanging every side by half the grid.
+        let big = vec![vec![vec![(-5.0, -5.0), (15.0, -5.0), (15.0, 15.0), (-5.0, 15.0)]]];
+        assert!(coverage_grid(10, 10, &big).iter().all(|&c| (c - 1.0).abs() < 1e-12));
+
+        // A triangle half off the left edge: what remains is its right half.
+        let tri = vec![vec![vec![(-4.0, 0.0), (4.0, 0.0), (0.0, 8.0)]]];
+        let total: f64 = coverage_grid(8, 8, &tri).iter().sum();
+        assert!((total - 16.0).abs() < 1e-9, "{total}");
+
+        // Off the bottom and the right.
+        let corner = vec![vec![vec![(6.0, 6.0), (12.0, 6.0), (12.0, 12.0), (6.0, 12.0)]]];
+        let total: f64 = coverage_grid(8, 8, &corner).iter().sum();
+        assert!((total - 4.0).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
+    fn a_cell_the_polygon_only_touches_is_not_covered() {
+        // Edges exactly on cell boundaries: the neighbours get nothing.
+        let cell = vec![vec![vec![(2.0, 2.0), (3.0, 2.0), (3.0, 3.0), (2.0, 3.0)]]];
+        let got = coverage_grid(5, 5, &cell);
+        for (i, &c) in got.iter().enumerate() {
+            assert_eq!(c, if i == 2 * 5 + 2 { 1.0 } else { 0.0 }, "cell {i}");
         }
     }
 }

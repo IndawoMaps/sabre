@@ -221,6 +221,44 @@ async fn query_method_reads_form_parameters_from_the_body() {
 }
 
 #[tokio::test]
+async fn polygon_queries_measure_area_nodata_and_classes() {
+    // The whole of l_shape: a shape valued 1 to 10 by row on a nodata (0)
+    // background, in degrees. Asked both ways a client might send it.
+    let form = serde_urlencoded::to_string(
+        [("url", "file://l_shape.tiff"), ("polygon", FULL_EXTENT), ("classes", "true")]).unwrap();
+    let json = serde_json::json!({"url": "file://l_shape.tiff", "polygon": FULL_EXTENT, "classes": true}).to_string();
+    for (content_type, body) in [("application/x-www-form-urlencoded", form), ("application/json", json)] {
+        let (status, _, body) = query(app(), "/query", Some(content_type), &body).await;
+        assert_eq!(status, StatusCode::OK, "{content_type}: {}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let area = &v["area"];
+        assert_eq!(area["method"], "spherical", "degrees are measured on the sphere");
+        let (total, data, nodata) = (area["total"].as_f64().unwrap(), area["data"].as_f64().unwrap(),
+                                     area["nodata"].as_f64().unwrap());
+        assert!(data > 0.0 && nodata > 0.0, "{area}");
+        assert!((data + nodata - total).abs() < 1e-6 * total, "{area}");
+
+        let classes = v["classes"].as_array().unwrap();
+        let values: Vec<f64> = classes.iter().map(|c| c["value"].as_f64().unwrap()).collect();
+        // One per row of the shape, 1 to 10, and never the 0 background.
+        assert_eq!(values.len(), 25, "{values:?}");
+        assert_eq!((values[0], values[24]), (1.0, 10.0));
+        assert!(!values.contains(&0.0), "nodata is not a class");
+        let fracs: f64 = classes.iter().map(|c| c["frac"].as_f64().unwrap()).sum();
+        let areas: f64 = classes.iter().map(|c| c["area"].as_f64().unwrap()).sum();
+        assert!((fracs - 1.0).abs() < 1e-9, "fracs are shares of the data: {fracs}");
+        assert!((areas - data).abs() < 1e-6 * data, "class areas add up to the data area");
+    }
+
+    // Without `classes` there is no breakdown.
+    let body = serde_urlencoded::to_string([("url", "file://l_shape.tiff"), ("polygon", FULL_EXTENT)]).unwrap();
+    let (_, _, body) = query(app(), "/query", Some("application/x-www-form-urlencoded"), &body).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v.get("classes").is_none(), "{v}");
+}
+
+#[tokio::test]
 async fn query_method_reads_json_parameters_from_the_body() {
     let body = r#"{"url": "file://l_shape.tiff", "lat": 0.22, "lng": 10.0135}"#;
     let (status, _, body) = query(app(), "/query", Some("application/json"), body).await;

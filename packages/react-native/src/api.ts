@@ -61,15 +61,44 @@ export function info(source: Source): Promise<RasterInfo> {
   return get("info", { url: source });
 }
 
+/** One distinct value under a polygon, when `classes` was asked for. */
+export interface ClassStats {
+  value: number;
+  /** Coverage fractions summed over the pixels holding it. */
+  count: number;
+  /** Its share of the polygon's area that has data. */
+  frac: number;
+  /** Square metres. Its share of the whole polygon is `area / area.total`. */
+  area: number;
+}
+
+/**
+ * Polygon statistics weight each pixel by the fraction of it the polygon
+ * covers, as exactextract does; the fields are its `count`, `sum`, `mean`,
+ * `stdev`, `min` and `max`. The four value statistics are `null` when every
+ * pixel under the polygon is nodata.
+ */
 export type QueryResult =
   | { kind: "point"; value: number | null }
-  | { kind: "polygon"; min: number; max: number; avg: number; stdev: number };
+  | {
+      kind: "polygon";
+      min: number | null;
+      max: number | null;
+      avg: number | null;
+      stdev: number | null;
+      count: number;
+      sum: number;
+      nodata_count: number;
+      /** Square metres of the polygon over the raster, with and without data. */
+      area: { total: number; data: number; nodata: number; method: "cartesian" | "spherical" };
+      classes?: ClassStats[];
+    };
 
 /** The value at a WGS84 point, or statistics inside a WKT polygon. */
 export function queryRaster(
   source: Source,
   at: { lng: number; lat: number } | { polygon: string },
-  options: { band?: number; nodata?: number } = {},
+  options: { band?: number; nodata?: number; classes?: boolean } = {},
 ): Promise<QueryResult> {
   return get("query", { url: source, ...at, ...options });
 }
