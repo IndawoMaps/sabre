@@ -97,8 +97,8 @@ Everything shares one version: the workspace `Cargo.toml`, the workspace crates 
 `build.gradle`, as listed in `release-please-config.json`. A new npm package needs adding
 there.
 
-npm publishes through trusted publishing: each package names this repo and `release.yml`
-as its trusted publisher on npmjs.com, so no token is stored. That setting only exists once
+npm publishes through trusted publishing: each package names this repo, `release.yml` and
+the `Publish` environment as its trusted publisher on npmjs.com, so no token is stored. That setting only exists once
 the package does, so **a new package's first version is published by hand**. Download the
 tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`, with the
 iOS library the `react-native-ios` job built on macOS), run
