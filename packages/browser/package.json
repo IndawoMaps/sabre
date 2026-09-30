@@ -1,6 +1,6 @@
 {
   "name": "@sabremaps/browser",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Render Cloud-Optimized GeoTIFF tiles in the browser: range reads, five style modes, reprojection, in a Web Worker. No server.",
   "type": "module",
   "exports": {
