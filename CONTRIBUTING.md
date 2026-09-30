@@ -88,9 +88,9 @@ diff alongside the code.
 Nobody tags a release by hand. [release-please](https://github.com/googleapis/release-please)
 keeps a PR open titled `chore(main): release x.y.z`, updated on every merge to `main`,
 with the next version and its changelog. Merging it is the release: the `release`
-workflow tags it, writes the GitHub release, attaches the Linux binaries, publishes
-`@sabremaps/browser`, `@sabremaps/ol` and `@sabremaps/react-native` to npm, and tags the images `x.y.z` and
-`latest`.
+workflow tags it, writes the GitHub release, attaches the Linux binaries, stages
+`@sabremaps/browser`, `@sabremaps/ol` and `@sabremaps/react-native` on npm for approval
+(below), and tags the images `x.y.z` and `latest`.
 
 Everything shares one version: the workspace `Cargo.toml`, the workspace crates in
 `Cargo.lock`, every package's `package.json`, and the React Native package's
@@ -98,7 +98,11 @@ Everything shares one version: the workspace `Cargo.toml`, the workspace crates 
 there.
 
 npm publishes through trusted publishing: each package names this repo, `release.yml` and
-the `Publish` environment as its trusted publisher on npmjs.com, so no token is stored. That setting only exists once
+the `Publish` environment as its trusted publisher on npmjs.com, so no token is stored.
+The publisher is limited to staged publishing, so the release only *stages* each package.
+Nothing is public until a maintainer approves it with 2FA: `npm stage list`, then
+`npm stage approve <id>` for each, or approve them on npmjs.com. Approve
+`@sabremaps/browser` before `@sabremaps/ol`, which depends on it. That setting only exists once
 the package does, so **a new package's first version is published by hand**. Download the
 tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`, with the
 iOS library the `react-native-ios` job built on macOS), run

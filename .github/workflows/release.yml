@@ -181,7 +181,7 @@ jobs:
           if-no-files-found: error
 
   npm:
-    name: npm publish
+    name: npm stage
     needs: [release-please, ios]
     if: needs.release-please.outputs.created == 'true'
     runs-on: ubuntu-latest
@@ -214,6 +214,9 @@ jobs:
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      # `npm stage` arrived in 11.15. Node 24 bundles a newer npm today, but a
+      # cached older 24.x would fail the publish on a missing command.
+      - run: npm install -g npm@^11.15.0 && npm --version
 
       - name: Build the wasm into @sabremaps/browser
         # As `just npm`: rewrite embedded source paths, which name the runner's
@@ -243,9 +246,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # pnpm packs, since it rewrites @sabremaps/ol's `workspace:^` into the
-      # version being released; npm publishes, since it speaks OIDC. browser
-      # goes first so ol never points at a version that isn't there yet.
-      - name: Publish
+      # version being released; npm publishes, since it speaks OIDC.
+      #
+      # Staged, not published: each package's trusted publisher allows only
+      # `npm stage publish`, so nothing reaches the registry until a maintainer
+      # approves it with 2FA (`npm stage list`, then `npm stage approve <id>`,
+      # or on npmjs.com). A compromised workflow can stage, but not release.
+      # Approve @sabremaps/browser before @sabremaps/ol, which depends on it.
+      - name: Stage
         run: |
           mkdir -p dist
           for p in browser ol react-native; do
@@ -256,6 +264,6 @@ jobs:
           test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'SabreFFI\.xcframework/.*/libsabre_mobile\.a$')" = 2
           # ./ is not optional: npm reads `dist/x.tgz` as the GitHub repo
           # dist/x.tgz, which is how the 0.0.2 release failed to publish.
-          npm publish ./dist/sabremaps-browser-*.tgz --access public
-          npm publish ./dist/sabremaps-ol-*.tgz --access public
-          npm publish ./dist/sabremaps-react-native-*.tgz --access public
+          npm stage publish ./dist/sabremaps-browser-*.tgz --access public
+          npm stage publish ./dist/sabremaps-ol-*.tgz --access public
+          npm stage publish ./dist/sabremaps-react-native-*.tgz --access public
