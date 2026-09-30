@@ -4,13 +4,13 @@ plugins {
 }
 
 group = 'com.sabremaps'
-version = '0.0.2' // x-release-please-version
+version = '0.1.0' // x-release-please-version
 
 android {
   namespace "com.sabremaps.mobile"
   defaultConfig {
     versionCode 1
-    versionName "0.0.2" // x-release-please-version
+    versionName "0.1.0" // x-release-please-version
   }
   // libsabre_mobile.so for each ABI lands in src/main/jniLibs, built by
   // `just rn-android` from crates/mobile. Shipped in the npm package, not the repo.
