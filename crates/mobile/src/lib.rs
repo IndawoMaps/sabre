@@ -64,8 +64,9 @@ static SERVER: Mutex<Option<Running>> = Mutex::new(None);
 /// Start the server, or return the one already running.
 ///
 /// A second call with the same `file_root` returns the running server's
-/// endpoint, so a screen can call this on mount without tracking whether
-/// another did. A call with a different root restarts it. `cache_bytes` bounds
+/// endpoint, if it still answers, so a screen can call this on mount without
+/// tracking whether another did. A server that no longer answers is replaced
+/// by a new one, on a new port. A call with a different root restarts it. `cache_bytes` bounds
 /// sabre's page cache; local files skip it today, so it only matters for
 /// `https://` sources.
 pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoint, String> {
@@ -73,9 +74,11 @@ pub fn start(file_root: impl Into<PathBuf>, cache_bytes: usize) -> Result<Endpoi
     let mut server = SERVER.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(running) = server.as_ref() {
-        // A thread that has finished has lost its listener -- on iOS, the
-        // system reclaims the socket of a suspended app -- so start afresh.
-        if running.file_root == file_root && !running.thread.is_finished() {
+        // On iOS the system reclaims a suspended app's sockets. The server's
+        // thread does not end when that happens -- axum logs the failed
+        // accept and tries again, forever -- so a live thread proves nothing.
+        // Ask the server itself.
+        if running.file_root == file_root && !running.thread.is_finished() && answers(&running.endpoint) {
             return Ok(running.endpoint.clone());
         }
     }
@@ -143,6 +146,29 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
+/// Whether the server at `ep` answers its own health check.
+///
+/// A request, not just a connection: on Android any app can bind a loopback
+/// port, and once ours is gone another could be listening on it. Only our
+/// server answers under our token.
+fn answers(ep: &Endpoint) -> bool {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let timeout = Duration::from_millis(500);
+    let Ok(mut conn) = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], ep.port).into(), timeout) else {
+        return false;
+    };
+    let _ = conn.set_read_timeout(Some(timeout));
+    let _ = conn.set_write_timeout(Some(timeout));
+    let request = format!("GET /{}/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", ep.token);
+    if conn.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut head = [0u8; 12];
+    conn.read_exact(&mut head).is_ok() && &head == b"HTTP/1.1 200"
+}
+
 /// 128 bits from the OS's secure random source, as hex. This is what keeps
 /// other apps out of a loopback port, so it is not left to a hasher's seed.
 fn token() -> Result<String, String> {
@@ -171,6 +197,10 @@ mod tests {
 
         let bare = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", ep.port)).unwrap();
         assert_eq!(bare.status(), 404, "routes need the token");
+
+        assert!(answers(&ep), "a running server answers its health check");
+        let impostor = Endpoint { port: ep.port, token: "0".repeat(32) };
+        assert!(!answers(&impostor), "only under its own token");
 
         geometry_is_put_in_once_and_named_after(&ep, &root);
 
@@ -227,6 +257,7 @@ mod tests {
         // The store outlives the server: iOS takes a suspended app's socket,
         // and the server started in its place must still have the geometry.
         stop();
+        assert!(!answers(ep), "a stopped server does not answer");
         let again = start(root, 1 << 20).unwrap();
         assert_ne!(again.token, ep.token);
         assert_eq!(http.get(format!(
