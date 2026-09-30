@@ -43,6 +43,21 @@ map.getView().fit(source.getExtent());
 Also accepted: `nodata`, `interpolation: 'bilinear'`, `tile_size` (64 to 512),
 and `mask`, a WKT polygon in WGS84 outside which pixels are transparent.
 
+For geometry that is large or shared between layers, put it in once with
+`geometries.set()` and clip by name instead of carrying WKT with every tile:
+
+```js
+import { geometries, sabreSource } from '@sabremaps/ol';
+
+await geometries.set('blocks', { 19519: blockGeoJson, 19520: blockTwkb });
+const source = await sabreSource(url, {
+  style: { colormap: 'rdylgn', geometry_provider: 'blocks', geometry_id: [19519, 19520] },
+});
+```
+
+A source redraws on its own when geometry under its `geometry_provider`
+changes. See `@sabremaps/browser` for `set`, `replace` and `delete`.
+
 Restyle with `source.setStyle(style)`. Nothing is downloaded again: the
 raster's bytes are cached in the worker, only the drawing is redone. Tiles in
 the old style are dropped at once, so the layer never shows two styles side by

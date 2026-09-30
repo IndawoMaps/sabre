@@ -6,7 +6,7 @@
 // One Cog per URL, shared by every layer on the page, so two styles of the
 // same raster read its bytes once.
 
-import init, { Cog } from '../wasm/sabre_browser.js';
+import init, { Cog, setGeometries, deleteGeometries } from '../wasm/sabre_browser.js';
 
 let ready;
 const cogs = new Map();
@@ -47,6 +47,11 @@ self.onmessage = async ({ data: msg }) => {
     } else if (type === 'tile') {
       const [result, transfer] = await tile(msg);
       self.postMessage({ id, result }, transfer);
+    } else if (type === 'geometry-set') {
+      const geometries = msg.geometries.map(asGeometry);
+      self.postMessage({ id, result: setGeometries(msg.provider, msg.ids, geometries, msg.replace) });
+    } else if (type === 'geometry-delete') {
+      self.postMessage({ id, result: deleteGeometries(msg.provider, msg.ids) });
     } else if (type === 'close') {
       cogs.get(msg.url)?.free();
       cogs.delete(msg.url);
@@ -58,3 +63,10 @@ self.onmessage = async ({ data: msg }) => {
     self.postMessage({ id, error: e instanceof Error ? e.message : String(e) });
   }
 };
+
+/** What wasm reads: TWKB as bytes, or WKT or GeoJSON as text. */
+function asGeometry(g) {
+  if (typeof g === 'string' || g instanceof ArrayBuffer || g instanceof Uint8Array) return g;
+  if (ArrayBuffer.isView(g)) return new Uint8Array(g.buffer, g.byteOffset, g.byteLength);
+  return JSON.stringify(g);
+}

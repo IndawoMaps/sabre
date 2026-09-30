@@ -34,7 +34,45 @@ export interface Style {
   interpolation?: 'nearest' | 'bilinear';
   /** WKT polygon or multipolygon in WGS84; pixels outside it are transparent. */
   mask?: string;
+  /**
+   * Clip to geometry put in with `geometries.set()` instead of sending a
+   * `mask`: the provider it was put under, and one or more of its ids.
+   * Several ids clip to their union. Not with `mask`.
+   */
+  geometry_provider?: string;
+  geometry_id?: string | number | Array<string | number>;
 }
+
+/**
+ * WGS84 clip geometry: TWKB bytes, WKT, or GeoJSON (a Polygon, MultiPolygon,
+ * Feature or FeatureCollection) as text or as an object.
+ */
+export type Geometry = ArrayBuffer | ArrayBufferView | string | object;
+
+/** Geometry by id: `{ id: geometry }`, a `Map`, or `[id, geometry]` pairs. */
+export type GeometryEntries =
+  | Record<string, Geometry>
+  | Map<string | number, Geometry>
+  | Iterable<[string | number, Geometry]>;
+
+/**
+ * Clip geometry, sent to the worker once and named by tiles with
+ * `geometry_provider` and `geometry_id`. Each change resolves to the
+ * provider's new revision. Tiles already drawn are not redrawn: subscribe,
+ * and redraw layers that name the provider.
+ */
+export const geometries: {
+  /** Add these, or overwrite them if the ids exist. Others are left alone. */
+  set(provider: string, entries: GeometryEntries): Promise<number>;
+  /** Make these the provider's whole contents, in one step. `{}` empties it. */
+  replace(provider: string, entries: GeometryEntries): Promise<number>;
+  /** Remove these ids. Ids the provider does not have are ignored. */
+  delete(provider: string, ids: Iterable<string | number>): Promise<number>;
+  /** The provider's revision as of the last change that finished; 0 before any. */
+  revision(provider: string): number;
+  /** Called after each change. Returns an unsubscribe function. */
+  subscribe(listener: (provider: string, revision: number) => void): () => void;
+};
 
 export interface RasterInfo {
   width: number;

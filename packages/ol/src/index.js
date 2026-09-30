@@ -13,9 +13,9 @@
 import DataTile from 'ol/source/DataTile.js';
 import TileGrid from 'ol/tilegrid/TileGrid.js';
 import { transformExtent } from 'ol/proj.js';
-import { open } from '@sabremaps/browser';
+import { geometries, open } from '@sabremaps/browser';
 
-export { configure } from '@sabremaps/browser';
+export { configure, geometries } from '@sabremaps/browser';
 
 /** Half the width of the Web Mercator world, in metres. */
 const HALF = 20037508.342789244;
@@ -38,6 +38,7 @@ export async function sabreSource(url, options = {}) {
 export class SabreSource extends DataTile {
   #raster;
   #style;
+  #unsubscribe;
 
   /** @param {import('@sabremaps/browser').Raster} raster */
   constructor(raster, options = {}) {
@@ -54,6 +55,12 @@ export class SabreSource extends DataTile {
     this.#style = { ...style };
     this.setKey(JSON.stringify(this.#style));
     this.setLoader((z, x, y, { signal }) => this.#raster.tile(z, x, y, this.#style, { signal }));
+    // Tiles clipped to named geometry are stale once it changes. Same key,
+    // new revision, as for a restyle: drop them all rather than show a
+    // patchwork of the old shape and the new.
+    this.#unsubscribe = geometries.subscribe((provider) => {
+      if (provider === this.#style.geometry_provider) this.changed();
+    });
   }
 
   /** The raster's own description: size, bands, EPSG, WGS84 extent, native zoom. */
@@ -97,6 +104,7 @@ export class SabreSource extends DataTile {
 
   /** Release the raster. The source cannot draw after this. */
   disposeInternal() {
+    this.#unsubscribe();
     this.#raster.close();
     super.disposeInternal();
   }

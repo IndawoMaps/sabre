@@ -3,8 +3,8 @@ import type { ProjectionLike } from 'ol/proj.js';
 import type { Extent } from 'ol/extent.js';
 import type { Raster, RasterInfo, Style } from '@sabremaps/browser';
 
-export type { Style, RasterInfo } from '@sabremaps/browser';
-export { configure } from '@sabremaps/browser';
+export type { Style, RasterInfo, Geometry, GeometryEntries } from '@sabremaps/browser';
+export { configure, geometries } from '@sabremaps/browser';
 
 export interface Options extends Omit<DataTileOptions, 'loader' | 'tileGrid' | 'projection' | 'tileSize' | 'maxZoom' | 'minZoom'> {
   /** How to draw it. Names and defaults follow sabre's HTTP API. */

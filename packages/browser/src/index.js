@@ -30,6 +30,66 @@ export async function open(url) {
   }
 }
 
+/**
+ * Clip geometry, sent to the worker once and named by tiles after that.
+ *
+ * A style's `mask` is WKT carried with every tile: copied into the worker,
+ * copied into wasm, and compared with the last one, per tile. A farm is 89 KB
+ * of it. Put the geometry here instead and a tile names it --
+ * `{ geometry_provider: 'blocks', geometry_id: ['19519', '19520'] }` -- the
+ * same two parameters a sabre server's geometry providers take.
+ *
+ * Geometry is WGS84 and may be TWKB (`ArrayBuffer` or `Uint8Array`), WKT, or
+ * GeoJSON as text or as an object. `entries` is `{ id: geometry }`, a `Map`,
+ * or `[id, geometry]` pairs.
+ *
+ * Tiles already drawn are not redrawn by a change here; each change returns
+ * the provider's new revision and tells `subscribe()` listeners, which is
+ * how a map layer knows to redraw.
+ */
+export const geometries = {
+  /** Add these, or overwrite them if the ids exist. Others are left alone. */
+  set(provider, entries) {
+    return change({ type: 'geometry-set', provider, ...split(entries), replace: false });
+  },
+  /** Make these the provider's whole contents, in one step. `{}` empties it. */
+  replace(provider, entries) {
+    return change({ type: 'geometry-set', provider, ...split(entries), replace: true });
+  },
+  /** Remove these ids. Ids the provider does not have are ignored. */
+  delete(provider, ids) {
+    return change({ type: 'geometry-delete', provider, ids: [...ids].map(String) });
+  },
+  /** The provider's revision as of the last change that finished; 0 before any. */
+  revision(provider) {
+    return revisions.get(provider) ?? 0;
+  },
+  /** Called with `(provider, revision)` after each change. Returns an unsubscribe function. */
+  subscribe(listener) {
+    geometryListeners.add(listener);
+    return () => { geometryListeners.delete(listener); };
+  },
+};
+
+const revisions = new Map();
+const geometryListeners = new Set();
+
+function split(entries) {
+  const pairs = entries instanceof Map || Symbol.iterator in Object(entries)
+    ? [...entries]
+    : Object.entries(entries ?? {});
+  return { ids: pairs.map(([id]) => String(id)), geometries: pairs.map(([, g]) => g) };
+}
+
+async function change(msg) {
+  const revision = await getClient().send(msg);
+  if (revision !== (revisions.get(msg.provider) ?? 0)) {
+    revisions.set(msg.provider, revision);
+    geometryListeners.forEach((l) => l(msg.provider, revision));
+  }
+  return revision;
+}
+
 export class Raster {
   #client;
   #closed = false;
@@ -117,6 +177,15 @@ class Client {
     }
     this.#holds.delete(url);
     this.call({ type: 'close', url }).catch(() => {});
+  }
+
+  /**
+   * Post straight to the worker, ahead of queued tiles. For geometry changes:
+   * a tile still waiting in the queue should draw the new shape, not the old.
+   */
+  async send(msg) {
+    await this.#ready;
+    return this.#post(msg);
   }
 
   async call(msg, signal) {

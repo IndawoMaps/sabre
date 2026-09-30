@@ -58,9 +58,36 @@ URL still holds it.
 | `tile_size` | `256` | Output size, 64 to 512 |
 | `interpolation` | nearest | `bilinear` for smooth resampling |
 | `mask` | | WKT polygon in WGS84; pixels outside it are transparent |
+| `geometry_provider`, `geometry_id` | | Clip to geometry put in with `geometries` (below) instead of a `mask` |
 
 Colormaps: `viridis`, `plasma`, `turbo`, `greys` (or `gray`), `rdylbu`,
 `spectral`, `reds`, `blues`, `greens`, `ylgnbu` and `hot`.
+
+### Clip geometry by name
+
+A `mask` travels with every tile: copied to the worker, into wasm, and
+compared against the last one, each time. For a block that is nothing; for a
+farm of them it is tens of kilobytes per tile. Send the geometry once instead,
+and have tiles name it:
+
+```js
+import { geometries } from '@sabremaps/browser';
+
+await geometries.set('blocks', { 19519: twkbBytes, 19520: geojson, 19521: 'POLYGON((…))' });
+
+raster.tile(z, x, y, { colormap: 'rdylgn', geometry_provider: 'blocks', geometry_id: [19519, 19520] });
+```
+
+`set()` adds or overwrites the ids it names and leaves the rest;
+`replace()` swaps the provider's whole contents in one step; `delete()`
+removes ids. Geometry is WGS84, as TWKB bytes, WKT, or GeoJSON. Several ids
+clip to their union, and an id that is not there is an error rather than a
+tile drawn without it.
+
+A change does not redraw tiles already on the map. Each one resolves to the
+provider's new revision and calls `geometries.subscribe()` listeners, which
+is the signal to redraw layers that name it. The names are those of a sabre
+server's geometry providers, so the same style works against either.
 
 ## How it runs
 
