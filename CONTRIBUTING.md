@@ -102,8 +102,8 @@ as its trusted publisher on npmjs.com, so no token is stored. That setting only 
 the package does, so **a new package's first version is published by hand**. Download the
 tarball CI built for it (the `react-native` job uploads `sabremaps-react-native`, with the
 iOS library the `react-native-ios` job built on macOS), run
-`npm publish <tarball> --access public`, then add the trusted publisher before the next
-release.
+`npm publish ./<tarball> --access public` -- the `./` matters, since npm reads a bare
+`dir/file.tgz` as a GitHub repo -- then add the trusted publisher before the next release.
 
 Dependabot opens grouped minor/patch updates weekly. They are merged automatically once CI
 passes; majors wait for a human, who can opt one in with the `automerge` label.

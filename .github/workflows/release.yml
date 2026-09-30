@@ -250,6 +250,8 @@ jobs:
           tar tzf dist/sabremaps-browser-*.tgz | grep -q wasm/sabre_browser_bg.wasm
           test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'libsabre_mobile\.so$')" = 4
           test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'SabreFFI\.xcframework/.*/libsabre_mobile\.a$')" = 2
-          npm publish dist/sabremaps-browser-*.tgz --access public
-          npm publish dist/sabremaps-ol-*.tgz --access public
-          npm publish dist/sabremaps-react-native-*.tgz --access public
+          # ./ is not optional: npm reads `dist/x.tgz` as the GitHub repo
+          # dist/x.tgz, which is how the 0.0.2 release failed to publish.
+          npm publish ./dist/sabremaps-browser-*.tgz --access public
+          npm publish ./dist/sabremaps-ol-*.tgz --access public
+          npm publish ./dist/sabremaps-react-native-*.tgz --access public
