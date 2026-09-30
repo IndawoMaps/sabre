@@ -21,7 +21,18 @@ name: release
 on:
   push:
     branches: [main]
+  # Run by hand, as an ordinary run, or with `tag` to stage a release that is
+  # already tagged on npm again -- when its npm job failed, say. A re-run of
+  # the failed job would use the workflow as it was at that release, mistake
+  # and all; this uses the workflow as it is now, on that release's code:
+  #
+  #   gh workflow run release.yml -f tag=v0.1.0
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to stage on npm again, e.g. v0.1.0. Empty for an ordinary run.
+        required: false
+        default: ''
 
 env:
   REGISTRY: ghcr.io
@@ -65,6 +76,8 @@ jobs:
   images:
     name: images
     needs: release-please
+    # Not when re-staging an old release: that would tag main's image as it.
+    if: inputs.tag == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -151,12 +164,14 @@ jobs:
   ios:
     name: iOS library
     needs: release-please
-    if: needs.release-please.outputs.created == 'true'
+    if: needs.release-please.outputs.created == 'true' || inputs.tag != ''
     runs-on: macos-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
@@ -181,9 +196,9 @@ jobs:
           if-no-files-found: error
 
   npm:
-    name: npm publish
+    name: npm stage
     needs: [release-please, ios]
-    if: needs.release-please.outputs.created == 'true'
+    if: needs.release-please.outputs.created == 'true' || inputs.tag != ''
     runs-on: ubuntu-latest
     # Named in each package's trusted publisher on npmjs.com: the OIDC token
     # carries it, and npm refuses a token from any other environment. The name
@@ -198,6 +213,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+      # A tag given by hand has to be a release, and the code checked out has
+      # to be that release's: staging 0.1.1's code as 0.1.0 would be worse
+      # than not staging at all.
+      - name: Check the tag is this release
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          for p in browser ol react-native; do
+            v=$(node -p "require('./packages/$p/package.json').version")
+            [ "v$v" = "$TAG" ] || { echo "::error::packages/$p is $v, not $TAG"; exit 1; }
+          done
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown,aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
@@ -214,6 +244,9 @@ jobs:
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      # `npm stage` arrived in 11.15. Node 24 bundles a newer npm today, but a
+      # cached older 24.x would fail the publish on a missing command.
+      - run: npm install -g npm@^11.15.0 && npm --version
 
       - name: Build the wasm into @sabremaps/browser
         # As `just npm`: rewrite embedded source paths, which name the runner's
@@ -243,9 +276,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # pnpm packs, since it rewrites @sabremaps/ol's `workspace:^` into the
-      # version being released; npm publishes, since it speaks OIDC. browser
-      # goes first so ol never points at a version that isn't there yet.
-      - name: Publish
+      # version being released; npm publishes, since it speaks OIDC.
+      #
+      # Staged, not published: each package's trusted publisher allows only
+      # `npm stage publish`, so nothing reaches the registry until a maintainer
+      # approves it with 2FA (`npm stage list`, then `npm stage approve <id>`,
+      # or on npmjs.com). A compromised workflow can stage, but not release.
+      # Approve @sabremaps/browser before @sabremaps/ol, which depends on it.
+      - name: Stage
         run: |
           mkdir -p dist
           for p in browser ol react-native; do
@@ -256,6 +294,6 @@ jobs:
           test "$(tar tzf dist/sabremaps-react-native-*.tgz | grep -c 'SabreFFI\.xcframework/.*/libsabre_mobile\.a$')" = 2
           # ./ is not optional: npm reads `dist/x.tgz` as the GitHub repo
           # dist/x.tgz, which is how the 0.0.2 release failed to publish.
-          npm publish ./dist/sabremaps-browser-*.tgz --access public
-          npm publish ./dist/sabremaps-ol-*.tgz --access public
-          npm publish ./dist/sabremaps-react-native-*.tgz --access public
+          npm stage publish ./dist/sabremaps-browser-*.tgz --access public
+          npm stage publish ./dist/sabremaps-ol-*.tgz --access public
+          npm stage publish ./dist/sabremaps-react-native-*.tgz --access public
