@@ -1418,7 +1418,7 @@ name = "sabre-mobile"
 version = "0.1.0"
 dependencies = [
  "axum",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "jni",
  "reqwest",
  "sabre-core",

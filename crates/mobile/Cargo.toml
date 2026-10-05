@@ -23,7 +23,7 @@ axum = { version = "0.8", default-features = false, features = ["tokio", "http1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
 serde_json = "1"
 # Already in the tree through rustls, so the token costs no new code.
-getrandom = "0.2"
+getrandom = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }
