@@ -235,7 +235,7 @@ jobs:
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
             -o packages/react-native/android/src/main/jniLibs build -p sabre-mobile --release
           find packages/react-native/android/src/main/jniLibs -name '*.so' ! -name libsabre_mobile.so -delete
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sabre-ffi-xcframework
           path: packages/react-native/ios/SabreFFI.xcframework
