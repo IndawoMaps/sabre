@@ -206,7 +206,7 @@ jobs:
             test "$(xcrun nm -gU packages/react-native/ios/SabreFFI.xcframework/$slice/libsabre_mobile.a 2>/dev/null \
               | grep -cE ' _sabre_(start|stop|string_free)$')" = 3
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sabre-ffi-xcframework
           path: packages/react-native/ios/SabreFFI.xcframework
@@ -273,7 +273,7 @@ jobs:
           done
       # The tarball exactly as a release would publish it, for trying it in an
       # app, or for publishing by hand the first time (see CONTRIBUTING.md).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sabremaps-react-native
           path: dist/sabremaps-react-native-*.tgz
