@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.1](https://github.com/IndawoMaps/sabre/compare/v0.1.0...v0.1.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **deps:** bump the cargo group with 3 updates ([#23](https://github.com/IndawoMaps/sabre/issues/23)) ([45af2a9](https://github.com/IndawoMaps/sabre/commit/45af2a99e671d2af9a80b1900c548dee16fb3d71))
+* **deps:** bump the cargo group with 4 updates ([#22](https://github.com/IndawoMaps/sabre/issues/22)) ([585a395](https://github.com/IndawoMaps/sabre/commit/585a395eb1089b323f1f7c724b06219ae1e7f73f))
+* **deps:** bump the cargo group with 8 updates ([#16](https://github.com/IndawoMaps/sabre/issues/16)) ([4084598](https://github.com/IndawoMaps/sabre/commit/408459823668075a21f877c83b7a4f834851ae64))
+* **deps:** bump trust roots for eMudhra CA compromise ([#24](https://github.com/IndawoMaps/sabre/issues/24)) ([264b98b](https://github.com/IndawoMaps/sabre/commit/264b98bdf8baa9c8952a3920c698d156e965a481))
+
 ## [0.1.0](https://github.com/IndawoMaps/sabre/compare/v0.0.2...v0.1.0) (2026-09-30)
 
 
