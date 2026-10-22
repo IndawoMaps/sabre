@@ -173,7 +173,7 @@ fn answers(ep: &Endpoint) -> bool {
 /// other apps out of a loopback port, so it is not left to a hasher's seed.
 fn token() -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|e| format!("cannot generate a token: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| format!("cannot generate a token: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
