@@ -22,7 +22,7 @@ async-trait = "0.1"
 futures-channel = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-proj4rs = "0.2"
+proj4rs = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 proj4rs = { version = "0.2", default-features = false }
